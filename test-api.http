@@ -1,0 +1,18 @@
+### 🧪 Kirim Permintaan Isi Pulsa
+POST http://localhost:5000/topup
+Content-Type: application/json
+
+{
+  "nomor": "081234567890",
+  "nominal": 10000
+}
+
+###
+
+### 🔍 Cek Status Job (ganti ID sesuai hasil sebelumnya)
+GET http://localhost:5000/admin/queues/api/queues/pulsa/jobs
+
+###
+
+### 🔁 Resend Job Gagal (ganti :id dengan ID job gagal)
+POST http://localhost:5000/resend/:id
