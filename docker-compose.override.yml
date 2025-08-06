@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  pulsa_api:
+    command: npm run dev
+    volumes:
+      - .:/app
+      - /app/node_modules # Hindari overwrite node_modules container
+    environment:
+      - REDIS_HOST=pulsa_redis
+      - REDIS_PORT=6379
+      - DATABASE_URL=postgresql://postgres:secret@pulsa_postgres:5432/postgres
+
+  pulsa_worker:
+    command: npm run worker
+    volumes:
+      - .:/app
+      - /app/node_modules
+    environment:
+      - REDIS_HOST=pulsa_redis
+      - REDIS_PORT=6379

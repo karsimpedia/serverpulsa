@@ -8,9 +8,58 @@ datasource db {
 }
 
 model User {
-  id        String   @id @default(uuid())
-  username  String   @unique
+  id        String       @id @default(uuid())
+  username  String       @unique
   password  String
-  saldo     Decimal  @default(0.00)
-  createdAt DateTime @default(now())
+  saldo     Decimal      @default(0.00)
+  createdAt DateTime     @default(now())
+  transaksi Transaksi[]
+}
+
+model Product {
+  id         String             @id @default(uuid())
+  kodeProduk String             @unique
+  nominal    Int
+  harga      Int
+  margin     Int
+  status     Boolean            @default(true) // aktif/tidak
+  jenis      String             // pulsa / tagihan
+  createdAt  DateTime           @default(now())
+  updatedAt  DateTime           @updatedAt
+  supplierProduct SupplierProduct[]
+  transaksi   Transaksi[]
+}
+
+model Supplier {
+  id        String     @id @default(uuid())
+  name      String     @unique
+  active    Boolean    @default(true)
+  baseUrl   String     // Contoh: https://api.tripay.co.id
+  apiKey    String     // Bisa juga username untuk Digiflazz
+  secretKey String?    // Optional, kalau supplier pakai secret tambahan
+  type      String     @default("json") // json, xml, form
+  createdAt DateTime   @default(now())
+  products  SupplierProduct[]
+}
+
+model SupplierProduct {
+  id         String    @id @default(uuid())
+  supplier   Supplier  @relation(fields: [supplierId], references: [id])
+  supplierId String
+  product    Product   @relation(fields: [productId], references: [id])
+  productId  String
+  status     Boolean   @default(true)
+  priority   Int       @default(0) // 0 = prioritas tinggi
+}
+
+model Transaksi {
+  id         String   @id @default(uuid())
+  user       User?    @relation(fields: [userId], references: [id])
+  userId     String?
+  product    Product  @relation(fields: [productId], references: [id])
+  productId  String
+  nomor      String
+  status     String   @default("pending") // pending / sukses / gagal
+  message    String?
+  createdAt  DateTime @default(now())
 }

@@ -4,7 +4,8 @@
   "scripts": {
     "api": "node api/api.js",
     "worker": "node worker/worker.js",
-    "dev": "nodemon api/api.js"
+    "dev": "nodemon api/api.js",
+    "seed": "node prisma/seed.js"
   },
   "dependencies": {
     "@bull-board/api": "^6.12.0",
