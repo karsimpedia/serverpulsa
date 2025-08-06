@@ -1,4 +1,4 @@
-version: '3.9'
+version: "3.9"
 
 services:
   api:
@@ -15,7 +15,7 @@ services:
       - .env
     volumes:
       - .:/app
-    command: npm run api
+    command: npm run dev-api
 
   worker:
     build:
@@ -29,7 +29,7 @@ services:
       - .env
     volumes:
       - .:/app
-    command: npm run worker
+    command: npm run dev-worker
 
   postgres:
     image: postgres:15
@@ -49,6 +49,17 @@ services:
     container_name: pulsa_redis
     ports:
       - "6379:6379"
+
+  mock_supplier:
+    build:
+      context: .
+      dockerfile: Dockerfile.supplier
+    container_name: pulsa_mock_supplier
+    ports:
+      - "5001:5001"
+    volumes:
+      - .:/app
+    command: node mock/supplier.js
 
 volumes:
   postgres_data:

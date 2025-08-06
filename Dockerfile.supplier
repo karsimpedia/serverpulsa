@@ -1,0 +1,20 @@
+FROM node:18
+WORKDIR /app
+COPY . .
+RUN npm install
+CMD ["node", "mock/supplier.js"]
+
+
+# Tambahkan ke docker-compose.yml
+
+# services:
+#   mock_supplier:
+#     build:
+#       context: .
+#       dockerfile: Dockerfile.supplier
+#     container_name: pulsa_mock_supplier
+#     ports:
+#       - "5001:5001"
+#     volumes:
+#       - .:/app
+#     command: node mock/supplier.js

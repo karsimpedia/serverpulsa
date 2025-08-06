@@ -1,0 +1,5 @@
+{
+  "watch": ["api", "worker", "mock"],
+  "ext": "js,json",
+  "ignore": ["node_modules"]
+}

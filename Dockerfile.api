@@ -1,6 +1,24 @@
+# FROM node:18
+# WORKDIR /app
+# COPY package*.json ./
+# RUN npm install
+# COPY . .
+# CMD ["npm", "run", "api"]
+
+
 FROM node:18
+
 WORKDIR /app
+
+# Salin file dependensi dan install
 COPY package*.json ./
 RUN npm install
+
+# Install nodemon global (opsional, bisa juga dari devDependencies)
+RUN npm install -g nodemon
+
+# Salin seluruh source code
 COPY . .
-CMD ["npm", "run", "api"]
+
+# Jalankan dengan nodemon
+CMD ["npm", "run", "dev-api"]

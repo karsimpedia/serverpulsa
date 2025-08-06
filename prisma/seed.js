@@ -1,101 +1,72 @@
-const { PrismaClient } = require('@prisma/client');
+// FILE: prisma/seed.js
+const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 
 async function main() {
-  console.log("🚀 Seeding data...");
-
-  // 1. Supplier
-  const tripay = await prisma.supplier.upsert({
-    where: { name: 'tripay' },
-    update: {},
-    create: { name: 'tripay', active: true },
-  });
-
-  const digiflazz = await prisma.supplier.upsert({
-    where: { name: 'digiflazz' },
-    update: {},
-    create: { name: 'digiflazz', active: true },
-  });
-
-  // 2. Produk
-  const xl1 = await prisma.product.upsert({
-    where: { kodeProduk: 'XL1' },
+  await prisma.reseller.upsert({
+    where: { id: "res1" },
     update: {},
     create: {
-      kodeProduk: 'XL1',
-      nominal: 1000,
-      harga: 1300,
-      margin: 300,
-      status: true,
-      jenis: 'pulsa',
+      id: "res1",
+      username: "reseller1", 
+      name: "Reseller Satu",
+      saldo: 20000,
+      password: "rahasia"
     },
   });
 
-  const xl5 = await prisma.product.upsert({
-    where: { kodeProduk: 'XL5' },
+  await prisma.product.upsert({
+    where: { id: "prod1" },
     update: {},
     create: {
-      kodeProduk: 'XL5',
-      nominal: 5000,
-      harga: 5300,
-      margin: 300,
-      status: true,
-      jenis: 'pulsa',
+      id: "prod1",
+      name: "Pulsa XL 10k",
+      nominal: 10000,
+      code: "XL10",
+      type: "elektrik",
+      isActive: true,
+      basePrice: 100
+
     },
   });
 
-  const pln50 = await prisma.product.upsert({
-    where: { kodeProduk: 'PLN50' },
+  await prisma.hargaJual.upsert({
+    where: { resellerId_productId: { resellerId: "res1", productId: "prod1" } },
     update: {},
     create: {
-      kodeProduk: 'PLN50',
-      nominal: 50000,
-      harga: 51000,
-      margin: 1000,
-      status: true,
-      jenis: 'tagihan',
+      resellerId: "res1",
+      productId: "prod1",
+      price: 9500,
     },
   });
 
-  // 3. Supplier-Product mapping
-  await prisma.supplierProduct.createMany({
-    data: [
-      {
-        supplierId: tripay.id,
-        productId: xl1.id,
-        status: true,
-        priority: 1,
-      },
-      {
-        supplierId: digiflazz.id,
-        productId: xl1.id,
-        status: true,
-        priority: 2,
-      },
-      {
-        supplierId: tripay.id,
-        productId: xl5.id,
-        status: true,
-        priority: 1,
-      },
-      {
-        supplierId: digiflazz.id,
-        productId: pln50.id,
-        status: true,
-        priority: 1,
-      },
-    ],
-    skipDuplicates: true,
+  await prisma.supplier.upsert({
+    where: { id: "sup1" },
+    update: {},
+    create: {
+      id: "sup1",
+      name: "MockSupplier",
+      apiUrl: "http://mock_supplier:5001/topup",
+      apiKey: "123456",
+    },
   });
 
-  console.log("✅ Seeder selesai.");
+  await prisma.supplierProduct.upsert({
+    where: { productId_supplierId: { productId: "prod1", supplierId: "sup1" } },
+    update: {},
+    create: {
+      productId: "prod1",
+      supplierId: "sup1",
+      kodeSupplier: "XL10",
+      isPrimary: true,
+    },
+  });
+
+  console.log("✅ Data seed selesai");
 }
 
-main()
-  .catch((e) => {
-    console.error(e);
-    process.exit(1);
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
+

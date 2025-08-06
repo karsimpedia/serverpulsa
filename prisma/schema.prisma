@@ -7,59 +7,94 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id        String       @id @default(uuid())
-  username  String       @unique
-  password  String
-  saldo     Decimal      @default(0.00)
-  createdAt DateTime     @default(now())
-  transaksi Transaksi[]
+model Reseller {
+  id         String      @id // <--- Hapus @default(uuid())
+  name       String
+  username   String      @unique
+  password   String
+  saldo      Decimal     @default(0.00)
+  parentId   String?     
+  parent     Reseller?   @relation("ParentChild", fields: [parentId], references: [id])
+  children   Reseller[]  @relation("ParentChild")
+  createdAt  DateTime    @default(now())
+
+  topups     Topup[]
+  mutasi     MutasiSaldo[]
+  hargaJual  HargaJual[]
 }
 
 model Product {
   id         String             @id @default(uuid())
-  kodeProduk String             @unique
+  code       String             @unique
+  name       String
+  type       String   // elektrik | ppob 
   nominal    Int
-  harga      Int
-  margin     Int
-  status     Boolean            @default(true) // aktif/tidak
-  jenis      String             // pulsa / tagihan
+  basePrice  Decimal
+  isActive   Boolean            @default(true)
   createdAt  DateTime           @default(now())
-  updatedAt  DateTime           @updatedAt
-  supplierProduct SupplierProduct[]
-  transaksi   Transaksi[]
+
+  supplierProducts SupplierProduct[]
+  hargaJual        HargaJual[]
+  topups           Topup[]
 }
+
+model HargaJual {
+  id         String     @id @default(uuid())
+  reseller   Reseller   @relation(fields: [resellerId], references: [id])
+  resellerId String
+  product    Product    @relation(fields: [productId], references: [id])
+  productId  String
+  price      Decimal    // harga jual ke reseller ini
+
+  @@unique([resellerId, productId])
+}
+
+model Topup {
+  id         String     @id @default(uuid())
+  phone      String
+  product    Product    @relation(fields: [productId], references: [id])
+  productId  String
+  status     String     // pending | success | failed
+  reseller   Reseller   @relation(fields: [resellerId], references: [id])
+  resellerId String
+  createdAt  DateTime   @default(now())
+  price      Decimal    // harga saat transaksi
+  ref        String?    // ID referensi ke supplier
+}
+
+model MutasiSaldo {
+  id         String     @id @default(uuid())
+  reseller   Reseller   @relation(fields: [resellerId], references: [id])
+  resellerId String
+  amount     Decimal
+  type       String     // topup | transfer-in | transfer-out | deposit | refund
+  note       String?
+  relatedTo  String?    // id topup/transfer tujuan
+  createdAt  DateTime   @default(now())
+}
+
 
 model Supplier {
-  id        String     @id @default(uuid())
-  name      String     @unique
-  active    Boolean    @default(true)
-  baseUrl   String     // Contoh: https://api.tripay.co.id
-  apiKey    String     // Bisa juga username untuk Digiflazz
-  secretKey String?    // Optional, kalau supplier pakai secret tambahan
-  type      String     @default("json") // json, xml, form
-  createdAt DateTime   @default(now())
-  products  SupplierProduct[]
+  id         String             @id @default(uuid())
+  name       String
+  apiUrl     String
+  apiKey     String
+  status     Boolean            @default(true)
+  createdAt  DateTime           @default(now())
+
+  supplierProducts SupplierProduct[]
 }
+
 
 model SupplierProduct {
-  id         String    @id @default(uuid())
-  supplier   Supplier  @relation(fields: [supplierId], references: [id])
-  supplierId String
-  product    Product   @relation(fields: [productId], references: [id])
-  productId  String
-  status     Boolean   @default(true)
-  priority   Int       @default(0) // 0 = prioritas tinggi
-}
+  id           String   @id @default(uuid())
+  supplierId   String
+  productId    String
+  kodeSupplier String
+  isPrimary    Boolean  @default(false)
 
-model Transaksi {
-  id         String   @id @default(uuid())
-  user       User?    @relation(fields: [userId], references: [id])
-  userId     String?
-  product    Product  @relation(fields: [productId], references: [id])
-  productId  String
-  nomor      String
-  status     String   @default("pending") // pending / sukses / gagal
-  message    String?
-  createdAt  DateTime @default(now())
+  supplier     Supplier @relation(fields: [supplierId], references: [id])
+  product      Product  @relation(fields: [productId], references: [id])
+
+  @@unique([productId, supplierId])  // ✅ ini yang diperlukan
 }

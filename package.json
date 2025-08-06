@@ -5,11 +5,16 @@
     "api": "node api/api.js",
     "worker": "node worker/worker.js",
     "dev": "nodemon api/api.js",
-    "seed": "node prisma/seed.js"
+    "seed": "node prisma/seed.js",
+    "dev-api": "nodemon api/api.js",
+    "dev-worker": "nodemon worker/worker.js"
   },
   "dependencies": {
     "@bull-board/api": "^6.12.0",
     "@bull-board/express": "^6.12.0",
+    "@prisma/client": "^5.22.0",
+    "axios": "^1.11.0",
+    "bcrypt": "^6.0.0",
     "bull": "^4.10.0",
     "bullmq": "^5.56.9",
     "dotenv": "^16.6.1",
@@ -19,6 +24,6 @@
     "prisma": "^5.4.1"
   },
   "devDependencies": {
-    "nodemon": "^3.0.2"
+    "nodemon": "^3.1.10"
   }
 }
