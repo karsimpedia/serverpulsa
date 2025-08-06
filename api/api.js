@@ -18,9 +18,11 @@ const app = express();
 app.use(express.json());
 const apitopup = require("./routes/topup");
 const resellerRoutes = require("./routes/reseller");
+const product = require("./routes/product");
 app.use("/admin/queues", serverAdapter.getRouter());
 app.use("/api", apitopup);
 app.use("/users",  resellerRoutes);
+app.use("/product",  product);
 
 app.post("/resend/:id", async (req, res) => {
   const job = await topupQueue.getJob(req.params.id);

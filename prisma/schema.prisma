@@ -8,30 +8,31 @@ datasource db {
 }
 
 model Reseller {
-  id         String      @id // <--- Hapus @default(uuid())
-  name       String
-  username   String      @unique
-  password   String
-  saldo      Decimal     @default(0.00)
-  parentId   String?     
-  parent     Reseller?   @relation("ParentChild", fields: [parentId], references: [id])
-  children   Reseller[]  @relation("ParentChild")
-  createdAt  DateTime    @default(now())
-
-  topups     Topup[]
-  mutasi     MutasiSaldo[]
-  hargaJual  HargaJual[]
+  id            String           @id // <--- Hapus @default(uuid())
+  name          String
+  username      String           @unique
+  password      String
+  saldo         Decimal          @default(0.00)
+  parentId      String?
+  parent        Reseller?        @relation("ParentChild", fields: [parentId], references: [id])
+  children      Reseller[]       @relation("ParentChild")
+  createdAt     DateTime         @default(now())
+  markupDefault Int              @default(100) // << markup default ke downline
+  topups        Topup[]
+  mutasi        MutasiSaldo[]
+  hargaJual     HargaJual[]
+  devices       ResellerDevice[]
 }
 
 model Product {
-  id         String             @id @default(uuid())
-  code       String             @unique
-  name       String
-  type       String   // elektrik | ppob 
-  nominal    Int
-  basePrice  Decimal
-  isActive   Boolean            @default(true)
-  createdAt  DateTime           @default(now())
+  id        String   @id @default(uuid())
+  code      String   @unique
+  name      String
+  type      String // elektrik | ppob 
+  nominal   Int
+  basePrice Decimal
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
 
   supplierProducts SupplierProduct[]
   hargaJual        HargaJual[]
@@ -39,62 +40,70 @@ model Product {
 }
 
 model HargaJual {
-  id         String     @id @default(uuid())
-  reseller   Reseller   @relation(fields: [resellerId], references: [id])
+  id         String   @id @default(uuid())
+  reseller   Reseller @relation(fields: [resellerId], references: [id])
   resellerId String
-  product    Product    @relation(fields: [productId], references: [id])
+  product    Product  @relation(fields: [productId], references: [id])
   productId  String
-  price      Decimal    // harga jual ke reseller ini
+  price      Decimal // harga jual ke reseller ini
 
   @@unique([resellerId, productId])
 }
 
 model Topup {
-  id         String     @id @default(uuid())
+  id         String   @id @default(uuid())
   phone      String
-  product    Product    @relation(fields: [productId], references: [id])
+  product    Product  @relation(fields: [productId], references: [id])
   productId  String
-  status     String     // pending | success | failed
-  reseller   Reseller   @relation(fields: [resellerId], references: [id])
+  status     String // pending | success | failed
+  reseller   Reseller @relation(fields: [resellerId], references: [id])
   resellerId String
-  createdAt  DateTime   @default(now())
-  price      Decimal    // harga saat transaksi
-  ref        String?    // ID referensi ke supplier
+  createdAt  DateTime @default(now())
+  price      Decimal // harga saat transaksi
+  ref        String? // ID referensi ke supplier
 }
 
 model MutasiSaldo {
-  id         String     @id @default(uuid())
-  reseller   Reseller   @relation(fields: [resellerId], references: [id])
+  id         String   @id @default(uuid())
+  reseller   Reseller @relation(fields: [resellerId], references: [id])
   resellerId String
   amount     Decimal
-  type       String     // topup | transfer-in | transfer-out | deposit | refund
+  type       String // topup | transfer-in | transfer-out | deposit | refund
   note       String?
-  relatedTo  String?    // id topup/transfer tujuan
-  createdAt  DateTime   @default(now())
+  relatedTo  String? // id topup/transfer tujuan
+  createdAt  DateTime @default(now())
 }
 
-
 model Supplier {
-  id         String             @id @default(uuid())
-  name       String
-  apiUrl     String
-  apiKey     String
-  status     Boolean            @default(true)
-  createdAt  DateTime           @default(now())
+  id        String   @id @default(uuid())
+  name      String
+  apiUrl    String
+  apiKey    String
+  status    Boolean  @default(true)
+  createdAt DateTime @default(now())
 
   supplierProducts SupplierProduct[]
 }
 
-
 model SupplierProduct {
-  id           String   @id @default(uuid())
+  id           String  @id @default(uuid())
   supplierId   String
   productId    String
   kodeSupplier String
-  isPrimary    Boolean  @default(false)
+  isPrimary    Boolean @default(false)
 
-  supplier     Supplier @relation(fields: [supplierId], references: [id])
-  product      Product  @relation(fields: [productId], references: [id])
+  supplier Supplier @relation(fields: [supplierId], references: [id])
+  product  Product  @relation(fields: [productId], references: [id])
 
-  @@unique([productId, supplierId])  // ✅ ini yang diperlukan
+  @@unique([productId, supplierId]) // ✅ ini yang diperlukan
+}
+
+model ResellerDevice {
+  id         String   @id @default(uuid())
+  reseller   Reseller @relation(fields: [resellerId], references: [id])
+  resellerId String
+  deviceType String // phone | ip | api | appid | uuid
+  deviceId   String
+
+  @@unique([resellerId, deviceType, deviceId])
 }

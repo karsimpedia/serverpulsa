@@ -3,12 +3,22 @@ POST http://localhost:4000/api/topup
 Content-Type: application/json
 
 {
-  "resellerId": "res1",
+  "resellerId": "LA0001",
   "productCode": "XL10",
   "phone": "082211334455"
 }
 
-###
+### 🧪 Tambah Product
+POST http://localhost:4000/product/add-product
+Content-Type: application/json
+
+{
+  "code": "XL10",
+  "name": "Pulsa XL 10K",
+  "type": "elektrik",
+  "nominal": 10000,
+  "basePrice": 9500
+}
 
 ### 🔍 Cek Status Job (ganti ID sesuai hasil sebelumnya)
 GET http://localhost:5000/admin/queues/api/queues/pulsa/jobs
@@ -38,6 +48,6 @@ Content-Type: application/json
 {
   "name": "Reseller Hebat",
   "username": "reshebaths",
-  "password": "rahasia123"
+  "password": "rahasia123s"
    
 }
