@@ -7,103 +7,316 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model Reseller {
-  id            String           @id // <--- Hapus @default(uuid())
-  name          String
-  username      String           @unique
-  password      String
-  saldo         Decimal          @default(0.00)
-  parentId      String?
-  parent        Reseller?        @relation("ParentChild", fields: [parentId], references: [id])
-  children      Reseller[]       @relation("ParentChild")
-  createdAt     DateTime         @default(now())
-  markupDefault Int              @default(100) // << markup default ke downline
-  topups        Topup[]
-  mutasi        MutasiSaldo[]
-  hargaJual     HargaJual[]
-  devices       ResellerDevice[]
+// Enums
+enum UserRole {
+  ADMIN
+  RESELLER
 }
 
-model Product {
+enum ProductType {
+  PULSA
+  TAGIHAN
+}
+
+enum SupplierStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum TransactionStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+  REFUNDED
+  CANCELED
+  EXPIRED
+}
+
+enum ChannelType {
+  API
+  IP
+  PHONE
+  APP_ID
+  UUID
+}
+
+enum MutasiType {
+  CREDIT
+  DEBIT
+  REFUND
+  ADJUST
+}
+
+// Optional: untuk skema komisi berbasis plan
+enum CommissionValueType {
+  AMOUNT
+  PERCENT
+}
+
+enum CommissionBase {
+  SELLPRICE
+  MARGIN
+}
+
+// Core Models
+model User {
   id        String   @id @default(uuid())
-  code      String   @unique
-  name      String
-  type      String // elektrik | ppob 
-  nominal   Int
-  basePrice Decimal
-  isActive  Boolean  @default(true)
+  username  String   @unique
+  password  String
+  role      UserRole @default(RESELLER)
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  supplierProducts SupplierProduct[]
-  hargaJual        HargaJual[]
-  topups           Topup[]
+  reseller Reseller?
 }
 
-model HargaJual {
-  id         String   @id @default(uuid())
-  reseller   Reseller @relation(fields: [resellerId], references: [id])
-  resellerId String
-  product    Product  @relation(fields: [productId], references: [id])
-  productId  String
-  price      Decimal // harga jual ke reseller ini
+model Reseller {
+  id           String   @id @default(uuid())
+  userId       String   @unique
+  name         String
+  apiKeyHash   String
+  isActive     Boolean  @default(true)
+  referralCode String?  @unique
+  pin          String?
+  address      String?
+  parentId     String?
+  levelCache   Int?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-  @@unique([resellerId, productId])
+  parent   Reseller?  @relation("ResellerTree", fields: [parentId], references: [id])
+  children Reseller[] @relation("ResellerTree")
+
+  user         User               @relation(fields: [userId], references: [id])
+  saldo        Saldo?
+  callbacks    ResellerCallback[]
+  channels     ResellerChannel[]
+  transactions Transaction[]
+  mutasi       MutasiSaldo[]
+
+  resellerPrices            ResellerPrice[]
+  commissionPlanAssignments CommissionPlanAssignment[]
+  commissionFlats           CommissionFlat[]
+  TransactionCommission     TransactionCommission[]
+
+  @@index([parentId])
 }
 
-model Topup {
-  id         String   @id @default(uuid())
-  phone      String
-  product    Product  @relation(fields: [productId], references: [id])
-  productId  String
-  status     String // pending | success | failed
-  reseller   Reseller @relation(fields: [resellerId], references: [id])
+model ResellerChannel {
+  id         String      @id @default(uuid())
   resellerId String
-  createdAt  DateTime @default(now())
-  price      Decimal // harga saat transaksi
-  ref        String? // ID referensi ke supplier
+  type       ChannelType
+  value      String
+  isActive   Boolean     @default(true)
+  createdAt  DateTime    @default(now())
+
+  reseller Reseller @relation(fields: [resellerId], references: [id])
+
+  @@unique([resellerId, type, value])
+}
+
+model Saldo {
+  id         String   @id @default(uuid())
+  resellerId String   @unique
+  amount     BigInt   @default(0)
+  updatedAt  DateTime @updatedAt
+
+  reseller Reseller      @relation(fields: [resellerId], references: [id])
+  mutasi   MutasiSaldo[]
 }
 
 model MutasiSaldo {
-  id         String   @id @default(uuid())
-  reseller   Reseller @relation(fields: [resellerId], references: [id])
+  id         String     @id @default(uuid())
   resellerId String
-  amount     Decimal
-  type       String // topup | transfer-in | transfer-out | deposit | refund
+  trxId      String?
+  amount     BigInt
+  type       MutasiType
   note       String?
-  relatedTo  String? // id topup/transfer tujuan
-  createdAt  DateTime @default(now())
+  createdAt  DateTime   @default(now())
+
+  reseller Reseller @relation(fields: [resellerId], references: [id])
+  Saldo    Saldo?   @relation(fields: [saldoId], references: [id])
+  saldoId  String?
+}
+
+model Product {
+  id        String      @id @default(uuid())
+  code      String      @unique
+  name      String
+  type      ProductType
+  nominal   Int?
+  basePrice BigInt
+  margin    BigInt      @default(0)
+  isActive  Boolean     @default(true)
+  createdAt DateTime    @default(now())
+
+  supplierProducts SupplierProduct[]
+  resellerPrices   ResellerPrice[]
+  commissionRules  CommissionRule[]
+  Transaction      Transaction[]
+  CommissionFlat   CommissionFlat[]
 }
 
 model Supplier {
-  id        String   @id @default(uuid())
+  id        String         @id @default(uuid())
   name      String
-  apiUrl    String
-  apiKey    String
-  status    Boolean  @default(true)
-  createdAt DateTime @default(now())
+  code      String         @unique
+  status    SupplierStatus @default(ACTIVE)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
 
-  supplierProducts SupplierProduct[]
+  endpoints SupplierEndpoint[]
+  products  SupplierProduct[]
+}
+
+model SupplierEndpoint {
+  id         String   @id @default(uuid())
+  supplierId String
+  name       String
+  baseUrl    String
+  apiKey     String?
+  secret     String?
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  supplier Supplier @relation(fields: [supplierId], references: [id])
 }
 
 model SupplierProduct {
-  id           String  @id @default(uuid())
-  supplierId   String
-  productId    String
-  kodeSupplier String
-  isPrimary    Boolean @default(false)
+  id          String   @id @default(uuid())
+  supplierId  String
+  productId   String
+  supplierSku String
+  costPrice   BigInt
+  isAvailable Boolean  @default(true)
+  priority    Int      @default(100)
+  updatedAt   DateTime @updatedAt
 
   supplier Supplier @relation(fields: [supplierId], references: [id])
   product  Product  @relation(fields: [productId], references: [id])
 
-  @@unique([productId, supplierId]) // ✅ ini yang diperlukan
+  @@unique([supplierId, productId])
+  @@index([productId, isAvailable, priority])
 }
 
-model ResellerDevice {
+model ResellerCallback {
   id         String   @id @default(uuid())
-  reseller   Reseller @relation(fields: [resellerId], references: [id])
   resellerId String
-  deviceType String // phone | ip | api | appid | uuid
-  deviceId   String
+  url        String
+  secret     String?
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
 
-  @@unique([resellerId, deviceType, deviceId])
+  reseller Reseller @relation(fields: [resellerId], references: [id])
+}
+
+model Transaction {
+  id              String            @id @default(uuid())
+  invoiceId       String            @unique
+  resellerId      String
+  productId       String
+  msisdn          String
+  sellPrice       BigInt
+  adminFee        BigInt            @default(0)
+  status          TransactionStatus @default(PENDING)
+  supplierId      String?
+  supplierRef     String?
+  supplierPayload Json?
+  supplierResult  Json?
+  callbackSentAt  DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  expiresAt       DateTime?
+  externalRefId   String?
+
+  reseller Reseller @relation(fields: [resellerId], references: [id])
+  product  Product  @relation(fields: [productId], references: [id])
+
+  commissions TransactionCommission[]
+
+  @@unique([resellerId, externalRefId])
+  @@index([resellerId, productId, msisdn, createdAt])
+}
+
+// Optional Pricing per Reseller
+model ResellerPrice {
+  id         String @id @default(uuid())
+  resellerId String
+  productId  String
+  sellPrice  BigInt
+
+  reseller Reseller @relation(fields: [resellerId], references: [id])
+  product  Product  @relation(fields: [productId], references: [id])
+
+  @@unique([resellerId, productId])
+}
+
+// Commission System (optional)
+model CommissionPlan {
+  id        String         @id @default(uuid())
+  name      String
+  isActive  Boolean        @default(true)
+  base      CommissionBase @default(MARGIN)
+  maxLevels Int            @default(3)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  rules       CommissionRule[]
+  assignments CommissionPlanAssignment[]
+}
+
+model CommissionRule {
+  id        String              @id @default(uuid())
+  planId    String
+  level     Int
+  valueType CommissionValueType
+  value     BigInt
+  productId String?
+
+  plan    CommissionPlan @relation(fields: [planId], references: [id])
+  product Product?       @relation(fields: [productId], references: [id])
+
+  @@unique([planId, level, productId])
+}
+
+model CommissionPlanAssignment {
+  id         String @id @default(uuid())
+  resellerId String @unique
+  planId     String
+
+  reseller Reseller       @relation(fields: [resellerId], references: [id])
+  plan     CommissionPlan @relation(fields: [planId], references: [id])
+}
+
+// Ledger detail payout komisi per transaksi
+model TransactionCommission {
+  id            String   @id @default(uuid())
+  transactionId String
+  resellerId    String
+  level         Int
+  amount        BigInt
+  createdAt     DateTime @default(now())
+
+  transaction Transaction @relation(fields: [transactionId], references: [id])
+  reseller    Reseller    @relation(fields: [resellerId], references: [id])
+
+  @@index([transactionId])
+}
+
+// Komisi flat per upline
+model CommissionFlat {
+  id         String   @id @default(uuid())
+  resellerId String
+  level      Int
+  amount     BigInt
+  productId  String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  reseller Reseller @relation(fields: [resellerId], references: [id])
+  product  Product? @relation(fields: [productId], references: [id])
+
+  @@unique([resellerId, level, productId])
+  @@index([resellerId, level])
 }

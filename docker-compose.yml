@@ -1,64 +1,94 @@
+version: "3.9"
+
+name: engine-pulsa
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pulsa_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pulsa}
+      POSTGRES_USER: ${POSTGRES_USER:-pulsa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pulsa}
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    container_name: pulsa_redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # Jalankan migrasi Prisma sekali, sebelum api/worker start
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pulsa_migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-pulsa}:${POSTGRES_PASSWORD:-pulsa}@postgres:5432/${POSTGRES_DB:-pulsa}?schema=public}
+    command: ["sh", "-c", "npx prisma generate && npx prisma migrate deploy"]
+    restart: "no"
+
   api:
     build:
       context: .
-      dockerfile: Dockerfile.api
+      dockerfile: Dockerfile
     container_name: pulsa_api
-    ports:
-      - "4000:4000"
     depends_on:
-      - postgres
-      - redis
-    env_file:
-      - .env
-    volumes:
-      - .:/app
-    command: npm run dev-api
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: ${PORT:-3000}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-pulsa}:${POSTGRES_PASSWORD:-pulsa}@postgres:5432/${POSTGRES_DB:-pulsa}?schema=public}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      # tambahkan env lain (API keys supplier, dsb)
+    ports:
+      - "${PORT:-3000}:3000"
+    command: ["node", "api/api.js"]
+    restart: unless-stopped
 
   worker:
     build:
       context: .
-      dockerfile: Dockerfile.worker
+      dockerfile: Dockerfile
     container_name: pulsa_worker
     depends_on:
-      - postgres
-      - redis
-    env_file:
-      - .env
-    volumes:
-      - .:/app
-    command: npm run dev-worker
-
-  postgres:
-    image: postgres:15
-    container_name: pulsa_postgres
-    restart: always
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: serverpulsa
-    ports:
-      - "5433:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-
-  redis:
-    image: redis:6
-    container_name: pulsa_redis
-    ports:
-      - "6379:6379"
-
-  mock_supplier:
-    build:
-      context: .
-      dockerfile: Dockerfile.supplier
-    container_name: pulsa_mock_supplier
-    ports:
-      - "5001:5001"
-    volumes:
-      - .:/app
-    command: node mock/supplier.js
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-pulsa}:${POSTGRES_PASSWORD:-pulsa}@postgres:5432/${POSTGRES_DB:-pulsa}?schema=public}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+    command: ["node", "worker/worker.js"]
+    restart: unless-stopped
 
 volumes:
-  postgres_data:
+  pgdata:
+  redisdata:

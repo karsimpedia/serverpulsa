@@ -14,8 +14,8 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm install
 
-# Install nodemon global (opsional, bisa juga dari devDependencies)
-RUN npm install -g nodemon
+# # Install nodemon global (opsional, bisa juga dari devDependencies)
+# RUN npm install -g nodemon
 
 # Salin seluruh source code
 COPY . .

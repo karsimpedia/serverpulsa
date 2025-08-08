@@ -1,8 +1,8 @@
-const express = require("express");
-const router = express.Router();
 
+import express  from "express"
+const routerTopup = express.Router();
 
-const apitopup = require("../controllers/topup")
-router.post("/topup", apitopup.topup);
+import { topup } from "../controllers/topup";
+ routerTopup.post("/",  topup);
 
-module.exports = router;
+export default  routerTopup
