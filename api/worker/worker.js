@@ -4,7 +4,7 @@ import axios from 'axios';
 import pkg from 'bullmq';
 import prisma from '../api/prisma.js';
 import { connection, QUEUE_NAME, trxQueue } from '../../queues.js';
-
+import { randomUUID } from "crypto"; // ⬅️ di atas file
 const { Worker } = pkg;
 
 console.log('🚀 Worker transaksi start …');
@@ -54,48 +54,65 @@ async function pickSupplierWithEndpoint(productId) {
   return null;
 }
 
+
+
 async function settlement(trxId) {
   const trx = await prisma.transaction.findUnique({ where: { id: trxId } });
   if (!trx) return;
 
-  // Terminal?
+  // status terminal
   const terminal = ['SUCCESS', 'FAILED', 'REFUNDED', 'CANCELED', 'EXPIRED'];
   if (!terminal.includes(trx.status)) return;
 
-  // Refund kalau FAILED/CANCELED/EXPIRED (belum REFUNDED)
+  // Refund jika gagal/batal/kedaluwarsa
   if (['FAILED', 'CANCELED', 'EXPIRED'].includes(trx.status)) {
     const need = BigInt(trx.sellPrice ?? 0n) + BigInt(trx.adminFee ?? 0n);
-
-    // Cek apakah sudah pernah dikreditkan (hindari double refund)
-    const refunded = await prisma.mutasiSaldo.findFirst({
-      where: { trxId: trx.id, type: 'REFUND' },
-      select: { id: true },
-    });
-    if (!refunded && need > 0n) {
-      await prisma.$transaction(async (tx) => {
-        const saldo = await tx.saldo.findUnique({ where: { resellerId: trx.resellerId } });
-        await tx.saldo.update({
-          where: { resellerId: trx.resellerId },
-          data: { amount: (saldo?.amount ?? 0n) + need },
-        });
-        await tx.mutasiSaldo.create({
-          data: {
-            resellerId: trx.resellerId,
-            trxId: trx.id,
-            amount: need,
-            type: 'REFUND',
-            note: `Refund ${trx.invoiceId}`,
-          },
-        });
+    if (need > 0n) {
+      // sudah pernah refund?
+      const refunded = await prisma.mutasiSaldo.findFirst({
+        where: { trxId: trx.id, type: 'REFUND' },
+        select: { id: true },
       });
-      console.log(`↩️  Refund selesai (${trx.invoiceId})`);
+      if (!refunded) {
+        await prisma.$transaction(async (tx) => {
+          // ambil saldo sebelum
+          const saldoRow = await tx.saldo.findUnique({
+            where: { resellerId: trx.resellerId },
+            select: { amount: true },
+          });
+          const before = saldoRow?.amount ?? 0n;
+          const after  = before + need;
+
+          // kembalikan saldo (atomic)
+          await tx.saldo.update({
+            where: { resellerId: trx.resellerId },
+            data: { amount: { increment: need } },
+          });
+
+          // catat mutasi REFUND (lengkap dengan source & before/after)
+          await tx.mutasiSaldo.create({
+            data: {
+              // gunakan ID mutasi yang unik, jangan pakai trx.id lagi bila sudah dipakai untuk HOLD
+              trxId: `MREF-${Date.now()}-${randomUUID().slice(0,8)}`,
+              resellerId: trx.resellerId,
+              type: 'REFUND',
+              source: 'REFUND_TRX',          // ⬅️ WAJIB, isi reason/source
+              amount: need,                  // konvensi: positif
+              beforeAmount: before,
+              afterAmount: after,
+              note: `Refund ${trx.invoiceId}`,
+              status: 'SUCCESS',
+            },
+          });
+        });
+        console.log(`↩️  Refund selesai (${trx.invoiceId})`);
+      }
     }
   }
 
-  // TODO: payout komisi ke upline ketika SUCCESS (kalau sudah siap rule-nya)
-  // Contoh placeholder:
-  // if (trx.status === 'SUCCESS') await payoutCommission(trx);
+  // TODO: payout komisi ketika SUCCESS (nanti)
 }
+
 
 // ========== Handlers ==========
 

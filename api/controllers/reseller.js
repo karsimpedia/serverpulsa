@@ -1,6 +1,7 @@
 // api/controllers/reseller.js
 import prisma from "../prisma.js";
 import bcrypt from "bcrypt";
+import { randomBytes } from "crypto";
 import { generateResellerId } from "../../utils/idGenerator.js";
 
 // GET saldo reseller login
@@ -107,7 +108,10 @@ export const registerReseller = async (req, res) => {
 
     const result = await prisma.$transaction(async (tx) => {
       let reseller; // <-- deklarasi di atas
-
+ const plainApiKey = randomBytes(32).toString("hex");
+     
+     console.log(plainApiKey)// 64 karakter hex
+      const apiKeyHash = await bcrypt.hash(plainApiKey, 10); // simpan di DB
       // username unik
       const existingUser = await tx.user.findUnique({ where: { username } });
       if (existingUser) throw new Error("USERNAME_TAKEN");
@@ -143,7 +147,7 @@ export const registerReseller = async (req, res) => {
           id: newId,
           userId: user.id,
           name,
-          apiKeyHash: "",
+          apiKeyHash: apiKeyHash,
           isActive: true,
           referralCode: normalizeCode(newId),
           pin: pinHashed,

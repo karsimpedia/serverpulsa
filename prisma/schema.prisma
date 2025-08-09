@@ -48,6 +48,12 @@ enum MutasiType {
   ADJUST
 }
 
+enum MutasiStatus {
+  SUCCESS
+  FAILED
+  PENDING
+}
+
 // Optional: untuk skema komisi berbasis plan
 enum CommissionValueType {
   AMOUNT
@@ -128,31 +134,32 @@ model ResellerChannel {
   @@unique([resellerId, type, value])
 }
 
-model Saldo {
-  id         String   @id @default(uuid())
-  resellerId String   @unique
-  amount     BigInt   @default(0)
-  updatedAt  DateTime @updatedAt
+model Saldo { 
+  resellerId String  @id
+  amount     BigInt  @default(0)
 
-  reseller Reseller      @relation(fields: [resellerId], references: [id])
-  mutasi   MutasiSaldo[]
+  reseller   Reseller @relation(fields: [resellerId], references: [id])
 }
 
 
 model MutasiSaldo {
-  id         String     @id @default(uuid())
-  resellerId String
-  trxId      String?
-  amount     BigInt
-  type       MutasiType
-  note       String?
-  createdAt  DateTime   @default(now())
+  id           String        @id @default(uuid())
+  trxId        String        @unique
+  resellerId   String
+  type         MutasiType
+  source       String        // contoh: "MANUAL_TOPUP", "REFUND", dll
+  amount       BigInt
+  beforeAmount BigInt
+  afterAmount  BigInt
+  note         String?
+  reference    String?
+  status       MutasiStatus  @default(SUCCESS)
+  createdAt    DateTime      @default(now())
 
-  reseller Reseller @relation(fields: [resellerId], references: [id])
-  Saldo    Saldo?   @relation(fields: [saldoId], references: [id])
-  saldoId  String?
+  reseller     Reseller      @relation(fields: [resellerId], references: [id])
+
+  @@index([resellerId, createdAt])
 }
-
 
 model ProductCategory {
   id        String    @id @default(uuid())

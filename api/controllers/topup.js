@@ -1,11 +1,11 @@
 // api/controllers/topup.js
 import prisma from "../prisma.js";
 
-import { trxQueue } from '../../queues.js';
+import { trxQueue } from "../../queues.js";
 import bcrypt from "bcrypt";
 export async function createTopup(req, res) {
-  const { productCode, msisdn, refId, pin, } = req.body;
-  const resellerId = req.body.resellerId ;
+  const { productCode, msisdn, refId, pin } = req.body;
+  const resellerId = req.body.resellerId;
 
   if (!productCode || !msisdn) {
     return res.status(400).json({ error: "productCode & msisdn wajib." });
@@ -17,8 +17,7 @@ export async function createTopup(req, res) {
     return res.status(400).json({ error: "PIN harus 6 digit angka." });
   }
   try {
-
-   // 0) Verifikasi PIN reseller
+    // 0) Verifikasi PIN reseller
     const reseller = await prisma.reseller.findUnique({
       where: { id: resellerId },
       select: { id: true, pin: true, isActive: true },
@@ -34,7 +33,9 @@ export async function createTopup(req, res) {
       return res.status(403).json({ error: "PIN salah." });
     }
     // 0) Ambil product lebih dulu (perlu productId untuk limit)
-    const product = await prisma.product.findUnique({ where: { code: productCode } });
+    const product = await prisma.product.findUnique({
+      where: { code: productCode },
+    });
     if (!product || !product.isActive) {
       return res.status(400).json({ error: "Produk tidak tersedia." });
     }
@@ -43,10 +44,14 @@ export async function createTopup(req, res) {
     if (refId) {
       const existingByRef = await prisma.transaction.findFirst({
         where: { resellerId, externalRefId: refId },
-        select: { invoiceId: true, status: true }
+        select: { invoiceId: true, status: true },
       });
       if (existingByRef) {
-        return res.json({ invoiceId: existingByRef.invoiceId, status: existingByRef.status, reused: true });
+        return res.json({
+          invoiceId: existingByRef.invoiceId,
+          status: existingByRef.status,
+          reused: true,
+        });
       }
       // tidak ada → lanjut (refId baru = bypass limit)
     } else {
@@ -57,12 +62,12 @@ export async function createTopup(req, res) {
       const recent = await prisma.transaction.findFirst({
         where: {
           resellerId,
-          productId: product.id,    // ← per produk
-          msisdn,                   // ← per nomor
+          productId: product.id, // ← per produk
+          msisdn, // ← per nomor
           createdAt: { gt: oneHourAgo },
           status: { in: blockingStatuses },
         },
-        select: { createdAt: true, invoiceId: true, status: true }
+        select: { createdAt: true, invoiceId: true, status: true },
       });
 
       if (recent) {
@@ -71,7 +76,8 @@ export async function createTopup(req, res) {
         const remainingMin = Math.ceil(remainingMs / 60000);
 
         return res.status(429).json({
-          error: "Tanpa refId, topup ke kombinasi produk+nomor ini dibatasi 1x per 1 jam.",
+          error:
+            "Tanpa refId, topup ke kombinasi produk+nomor ini dibatasi 1x per 1 jam.",
           detail: { productCode, msisdn },
           retryAfterMinutes: remainingMin,
           lastInvoiceId: recent.invoiceId,
@@ -83,7 +89,8 @@ export async function createTopup(req, res) {
 
     // 3) Validasi saldo & harga
     const saldo = await prisma.saldo.findUnique({ where: { resellerId } });
-    if (!saldo) return res.status(400).json({ error: "Saldo tidak ditemukan." });
+    if (!saldo)
+      return res.status(400).json({ error: "Saldo tidak ditemukan." });
 
     const sellPrice = BigInt(product.basePrice) + BigInt(product.margin);
     const adminFee = 0n;
@@ -96,32 +103,58 @@ export async function createTopup(req, res) {
 
     try {
       const trx = await prisma.$transaction(async (tx) => {
+        // ambil ulang saldo di dalam transaksi (hindari race)
+        const saldoRow = await tx.saldo.findUnique({
+          where: { resellerId },
+          select: { amount: true },
+        });
+        if (!saldoRow) throw new Error("SALDO_NOT_FOUND");
+
+        const holdAmount =
+          BigInt(String(product.basePrice)) +
+          BigInt(String(product.margin)) +
+          0n; // = sellPrice + adminFee
+        if (saldoRow.amount < holdAmount)
+          throw new Error("INSUFFICIENT_BALANCE");
+
+        // buat transaksi dulu
         const created = await tx.transaction.create({
           data: {
             invoiceId,
             resellerId,
             productId: product.id,
             msisdn,
-            sellPrice,
-            adminFee,
+            sellPrice:
+              BigInt(String(product.basePrice)) +
+              BigInt(String(product.margin)),
+            adminFee: 0n,
             status: "PENDING",
-            externalRefId: refId ?? null, // simpan refId jika ada
+            externalRefId: refId ?? null,
             expiresAt: new Date(Date.now() + 5 * 60 * 1000),
           },
         });
 
-     const saldo=   await tx.saldo.update({
+        const beforeAmount = saldoRow.amount;
+        const afterAmount = beforeAmount - holdAmount;
+
+        // update saldo: atomic decrement
+        await tx.saldo.update({
           where: { resellerId },
-          data: { amount: saldo.amount - (sellPrice + adminFee) },
+          data: { amount: { decrement: holdAmount } },
         });
- console.log(saldo)
+
+        // catat mutasi (pakai nilai positif untuk amount; tipe=DEBIT sudah menjelaskan arah)
         await tx.mutasiSaldo.create({
           data: {
-            resellerId,
             trxId: created.id,
-            amount: -(sellPrice + adminFee),
+            resellerId,
             type: "DEBIT",
+            source: "HOLD_TRX",
+            amount: holdAmount,
+            beforeAmount,
+            afterAmount,
             note: `Hold saldo untuk ${invoiceId}`,
+            status: "SUCCESS",
           },
         });
 
@@ -129,17 +162,31 @@ export async function createTopup(req, res) {
       });
 
       // 5) Enqueue ke worker
-      await trxQueue.add("dispatch", { trxId: trx.id }, { removeOnComplete: true, removeOnFail: true });
-
+      await trxQueue.add(
+        "dispatch",
+        { trxId: trx.id },
+        { removeOnComplete: true, removeOnFail: true }
+      );
       return res.json({ invoiceId, status: "PENDING" });
     } catch (e) {
-      // Kalau refId duplikat karena race → kembalikan transaksi yang ada
+      if (e.message === "INSUFFICIENT_BALANCE") {
+        return res.status(400).json({ error: "Saldo tidak cukup." });
+      }
+      if (e.message === "SALDO_NOT_FOUND") {
+        return res.status(400).json({ error: "Saldo tidak ditemukan." });
+      }
+      // race condition pada refId
       if (e.code === "P2002" && refId) {
         const dup = await prisma.transaction.findFirst({
           where: { resellerId, externalRefId: refId },
-          select: { invoiceId: true, status: true }
+          select: { invoiceId: true, status: true },
         });
-        if (dup) return res.json({ invoiceId: dup.invoiceId, status: dup.status, reused: true });
+        if (dup)
+          return res.json({
+            invoiceId: dup.invoiceId,
+            status: dup.status,
+            reused: true,
+          });
       }
       throw e;
     }

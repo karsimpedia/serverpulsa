@@ -162,9 +162,21 @@ async function main() {
 
   // User & Reseller (saldo 50.000)
   const hashedPass = await bcrypt.hash("123456", 10);
+   const hashedPassAdmin = await bcrypt.hash("admin", 10);
   const hashedPin  = await bcrypt.hash("123456", 10);
 
-  const userReseller = await prisma.user.upsert({
+  const userAdmin = await prisma.user.upsert({
+    where: { username: "admin" },
+    update: { password: hashedPassAdmin, role: "ADMIN" },
+    create: { username: "admin", password: hashedPassAdmin, role: "ADMIN" },
+  });
+
+  // // Pastikan tidak tabrakan id/unique
+  // await prisma.reseller.deleteMany({ where: { OR: [{ userId: userAdmin.id }] } });
+
+
+
+    const userReseller = await prisma.user.upsert({
     where: { username: "reseller1" },
     update: { password: hashedPass, role: "RESELLER" },
     create: { username: "reseller1", password: hashedPass, role: "RESELLER" },

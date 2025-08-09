@@ -22,7 +22,7 @@ import referralRoutes from "./routes/referral.js";
 import trxDetailRoutes from "./routes/transactionDetail.js";
 import categoryRoutes from "./routes/category.js";
 import authRoutes from "./routes/auth.js";
-
+import adminRoute from "./routes/admin.js"
 
 
 const app = express();
@@ -39,6 +39,7 @@ createBullBoard({
 });
 app.use("/bull", serverAdapter.getRouter());
 app.use("/api/auth", authRoutes);
+app.use("/api/admin", adminRoute);
 app.use("/api/topup",  routerTopup);
 app.use("/api/trx", trxDetailRoutes);
 // Routes transaksi (dashboard + list + stream)

@@ -59,6 +59,46 @@ export async function loginReseller(req, res) {
   }
 }
 
+
+export async function loginAdmin(req, res) {
+  try {
+    const { username, password } = req.body || {};
+    if (!username || !password)
+      return res.status(400).json({ error: "Username dan password wajib." });
+
+    // cari user
+    const user = await prisma.user.findUnique({ where: { username } });
+    if (!user) return res.status(401).json({ error: "Username atau password salah." });
+    if (user.role !== "ADMIN")
+      return res.status(403).json({ error: "Bukan akun ADMIN." });
+
+    // cek password
+    const ok = await bcrypt.compare(password, user.password);
+    if (!ok) return res.status(401).json({ error: "Username atau password salah." });
+
+    // ambil reseller
+    // const reseller = await prisma.reseller.findUnique({
+    //   where: { userId: user.id },
+    //   select: { id: true, name: true, isActive: true },
+    // });
+    // if (!reseller) return res.status(404).json({ error: "Reseller tidak ditemukan." });
+    // if (!reseller.isActive) return res.status(403).json({ error: "Akun reseller non-aktif." });
+
+    // buat token
+    const payload = { id: user.id, role: user.role, resellerId: reseller.id };
+    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES });
+
+    setAuthCookie(res, token);
+    return res.json({
+      message: "Login berhasil.",
+      user: { id: user.id, username: user.username, role: user.role },    
+      token, // kalau mau purely cookie-based, boleh dihapus dari body
+    });
+  } catch (e) {
+    console.error("loginReseller:", e);
+    return res.status(500).json({ error: "Gagal login." });
+  }
+}
 export async function me(req, res) {
   try {
     // req.user dari middleware
