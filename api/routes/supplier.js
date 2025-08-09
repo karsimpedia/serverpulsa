@@ -8,7 +8,7 @@ import {
   updateSupplier,
   deleteSupplier,
   supplierCallback,
-} from "../controllers/supplier";
+} from "../controllers/supplier.js";
 
 
 routerSuplier.post("/callback/:supplierCode", supplierCallback);

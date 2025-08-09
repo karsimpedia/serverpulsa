@@ -71,8 +71,10 @@ model User {
   reseller Reseller?
 }
 
+
+
 model Reseller {
-  id           String   @id @default(uuid())
+  id           String   @id 
   userId       String   @unique
   name         String
   apiKeyHash   String
@@ -99,8 +101,18 @@ model Reseller {
   commissionPlanAssignments CommissionPlanAssignment[]
   commissionFlats           CommissionFlat[]
   TransactionCommission     TransactionCommission[]
-
+  devices Device[]
   @@index([parentId])
+}
+
+model Device {
+  id         String    @id @default(uuid())
+  resellerId String
+  reseller   Reseller  @relation(fields: [resellerId], references: [id])
+  type       String    // contoh: "API" | "IP" | "APP"
+  identifier String    @unique // contoh: IP, AppID, UUID, dsb
+  isActive   Boolean   @default(true)
+  createdAt  DateTime  @default(now())
 }
 
 model ResellerChannel {
@@ -126,6 +138,7 @@ model Saldo {
   mutasi   MutasiSaldo[]
 }
 
+
 model MutasiSaldo {
   id         String     @id @default(uuid())
   resellerId String
@@ -138,6 +151,16 @@ model MutasiSaldo {
   reseller Reseller @relation(fields: [resellerId], references: [id])
   Saldo    Saldo?   @relation(fields: [saldoId], references: [id])
   saldoId  String?
+}
+
+
+model ProductCategory {
+  id        String    @id @default(uuid())
+  name      String    @unique          // contoh: PULSA REGULER XL
+  code      String?   @unique          // opsional untuk kode kategori, ex: XL-REG
+  products  Product[]
+  description String?
+  createdAt DateTime  @default(now())
 }
 
 model Product {
@@ -156,6 +179,8 @@ model Product {
   commissionRules  CommissionRule[]
   Transaction      Transaction[]
   CommissionFlat   CommissionFlat[]
+  categoryId  String?
+  category    ProductCategory? @relation(fields: [categoryId], references: [id])
 }
 
 model Supplier {

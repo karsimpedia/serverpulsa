@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 import authReseller from "./middleware/authReseller.js";
+import cookieParser from "cookie-parser";
 
 import routerTopup from "./routes/topup.js";
 
@@ -19,9 +20,13 @@ import transactionRoutes from "./routes/transaction.js";
 import billingRoutes from "./routes/billing.js";
 import referralRoutes from "./routes/referral.js";
 import trxDetailRoutes from "./routes/transactionDetail.js";
+import categoryRoutes from "./routes/category.js";
+import authRoutes from "./routes/auth.js";
+
 
 
 const app = express();
+app.use(cookieParser()); 
 app.use(express.json());
 app.use(morgan("dev"));
 
@@ -33,9 +38,9 @@ createBullBoard({
   serverAdapter,
 });
 app.use("/bull", serverAdapter.getRouter());
-
-app.use("/api/topup", authReseller, routerTopup);
-app.use("/api/transactions", trxDetailRoutes);
+app.use("/api/auth", authRoutes);
+app.use("/api/topup",  routerTopup);
+app.use("/api/trx", trxDetailRoutes);
 // Routes transaksi (dashboard + list + stream)
 app.use("/api/transactions", transactionRoutes);
 app.use("/api/reseller", routeReseller);
@@ -44,6 +49,7 @@ app.use("/api/products", routerProduct);
 app.use("/api/suppliers", routerSuplier);
 app.use("/api/referral", referralRoutes);
 app.use("/api/billing", billingRoutes);
+app.use("/api/category", categoryRoutes);
 app.post("/api/admin/reseller/:id/parent", async (req, res) => {
   const { id } = req.params;
   const { parentId } = req.body;

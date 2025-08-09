@@ -2,7 +2,7 @@
 import express  from "express"
 const routerTopup = express.Router();
 
-import { topup } from "../controllers/topup";
- routerTopup.post("/",  topup);
+import { createTopup } from "../controllers/topup.js";
+ routerTopup.post("/",  createTopup);
 
 export default  routerTopup

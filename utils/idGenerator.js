@@ -1,6 +1,6 @@
 // utils/idGenerator.js
 
-import prisma from "../api/prisma";
+import prisma from "../api/prisma.js";
 
 
 export async  function generateResellerId() {

@@ -61,78 +61,128 @@ export async function createResellerCallback(req, res) {
 }
 
 // Create new reseller
-function normalizeCode(s) {
-  return String(s || "").trim().toUpperCase();
+
+
+const normalizePhone = (s="") => s.replace(/[^\d]/g,''); // keep digits only
+const normalizeCode  = (s="") => s.trim().toUpperCase().replace(/\s+/g,'');
+async function ensureResellerSeq(tx) {
+  // Buat sequence jika belum ada
+  await tx.$executeRawUnsafe(`CREATE SEQUENCE IF NOT EXISTS public.reseller_seq START 1`);
+
+  // Sinkronkan posisi sequence dengan ID terbesar yang formatnya LAxxxx
+  await tx.$executeRawUnsafe(`
+    SELECT setval(
+      'public.reseller_seq',
+      GREATEST(
+        COALESCE((SELECT last_value FROM public.reseller_seq), 0),
+        COALESCE((
+          SELECT MAX(CAST(SUBSTRING(id, 3) AS INTEGER))
+          FROM "Reseller"
+          WHERE id ~ '^LA[0-9]+$'
+        ), 0)
+      ),
+      true
+    )
+  `);
 }
+
+async function nextResellerId(tx) {
+  // pastikan sequence tersedia & sinkron
+  await ensureResellerSeq(tx);
+
+  const rows = await tx.$queryRaw`SELECT nextval('public.reseller_seq') AS v`;
+  const num = Number(rows[0].v);
+  return `LA${String(num).padStart(4, "0")}`;
+}
+// helper ambil nomor berikutnya dari sequence (atomic)
 
 export const registerReseller = async (req, res) => {
   try {
-    const { name, username, password, referralCode } = req.body;
-
-    if (!name || !username || !password) {
-      return res.status(400).json({ error: "Name, username, dan password wajib diisi." });
+    const { name, username, password, referralCode, pin, phonenumber } = req.body;
+    if (!name || !username || !password || !phonenumber) {
+      return res.status(400).json({ error: "Name, username, password, dan phone number wajib diisi." });
     }
+    const phone = normalizePhone(phonenumber);
+    if (phone.length < 8) return res.status(400).json({ error: "Nomor HP tidak valid." });
 
-    // Cek username unik
-    const existingUser = await prisma.user.findUnique({ where: { username } });
-    if (existingUser) {
-      return res.status(409).json({ error: "Username sudah digunakan." });
-    }
+    const result = await prisma.$transaction(async (tx) => {
+      let reseller; // <-- deklarasi di atas
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+      // username unik
+      const existingUser = await tx.user.findUnique({ where: { username } });
+      if (existingUser) throw new Error("USERNAME_TAKEN");
 
-    // Buat user dulu
-    const user = await prisma.user.create({
-      data: {
-        username,
-        password: hashedPassword,
-        role: "RESELLER"
+      // referrer (opsional)
+      let parent = null;
+      if (referralCode) {
+        const codeRef = normalizeCode(referralCode);
+        parent = await tx.reseller.findUnique({ where: { referralCode: codeRef } });
+        if (!parent) throw new Error("REFERRER_NOT_FOUND");
       }
-    });
 
-    // Normalisasi kode referral
-    let finalReferral = referralCode ? normalizeCode(referralCode) : null;
+      // phone unik
+      const existingPhone = await tx.device.findUnique({ where: { identifier: phone } });
+      if (existingPhone) throw new Error("PHONE_TAKEN");
 
-    // Cek kode referral kalau user input manual
-    if (finalReferral) {
-      const existingRef = await prisma.reseller.findUnique({
-        where: { referralCode: finalReferral }
+      // hash
+      const hashedPassword = await bcrypt.hash(password, 10);
+      const pinHashed      = await bcrypt.hash(pin || "123456", 10);
+
+      // user
+      const user = await tx.user.create({
+        data: { username, password: hashedPassword, role: "RESELLER" },
+        select: { id: true },
       });
-      if (existingRef) {
-        return res.status(409).json({ error: "Kode referral sudah digunakan reseller lain." });
-      }
-    }
 
-    // Buat reseller (kalau referral tidak diisi, nanti di-update setelah create)
-    let reseller = await prisma.reseller.create({
-      data: {
-        userId: user.id,
-        name,
-        apiKeyHash: "", // bisa diisi nanti
-        isActive: true,
-        referralCode: finalReferral || "" // isi kosong dulu kalau belum ada
-      }
-    });
+      // id LAxxxx
+      const newId = await nextResellerId(tx);
 
-    // Kalau referralCode belum diisi, pakai id reseller
-    if (!finalReferral) {
-      const autoCode = normalizeCode(reseller.id);
-      await prisma.reseller.update({
-        where: { id: reseller.id },
-        data: { referralCode: autoCode }
+      // reseller
+      reseller = await tx.reseller.create({
+        data: {
+          id: newId,
+          userId: user.id,
+          name,
+          apiKeyHash: "",
+          isActive: true,
+          referralCode: normalizeCode(newId),
+          pin: pinHashed,
+          parentId: parent?.id ?? null,
+        },
       });
-      reseller.referralCode = autoCode;
-    }
 
-    res.status(201).json({
-      message: "Reseller berhasil didaftarkan.",
-      reseller
+      // saldo
+      await tx.saldo.upsert({
+        where: { resellerId: reseller.id },
+        update: {},
+        create: { resellerId: reseller.id, amount: BigInt(0) },
+      });
+
+      // device
+      await tx.device.create({
+        data: { resellerId: reseller.id, type: "PHONE", identifier: phone, isActive: true },
+      });
+
+      return reseller;
     });
+
+    res.status(201).json({ message: "Reseller berhasil didaftarkan.", reseller: result });
   } catch (err) {
+    if (err.message === "USERNAME_TAKEN")     return res.status(409).json({ error: "Username sudah digunakan." });
+    if (err.message === "REFERRER_NOT_FOUND") return res.status(404).json({ error: "Kode referral tidak ditemukan." });
+    if (err.message === "PHONE_TAKEN")        return res.status(409).json({ error: "No HP sudah terdaftar." });
+    if (err.code === "P2002") {
+      const fields = Array.isArray(err.meta?.target) ? err.meta.target.join(", ") : "field unik";
+      return res.status(409).json({ error: `Data duplikat pada ${fields}.` });
+    }
     console.error("Register reseller error:", err);
     res.status(500).json({ error: "Internal server error." });
   }
 };
+
+// util yang dipakai
+
+
 
 // List all resellers
 export async function resellerList(req, res) {

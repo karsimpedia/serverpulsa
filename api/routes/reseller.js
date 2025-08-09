@@ -2,11 +2,11 @@
 
 import express from "express"
 const routeReseller = express.Router();
-import authReseller from "../middleware/authReseller";
-import { setMyReferralCode } from "../controllers/referral.js";
-import { RegisTerReseller, resellerList , updateReseller, deleteReseller, getSaldo, getMutasi, createResellerCallback} from "../controllers/reseller";
+import authReseller from "../middleware/authReseller.js";
+
+import { registerReseller, resellerList , updateReseller, deleteReseller, getSaldo, getMutasi, createResellerCallback} from "../controllers/reseller.js";
 // Register new reseller
-routeReseller.post("/register",RegisTerReseller);
+routeReseller.post("/register",registerReseller);
 
 // Get all resellers
 routeReseller.get("/", resellerList);
@@ -17,7 +17,7 @@ routeReseller.get("/mutasi",authReseller, getMutasi);
 
 // Update reseller by ID
 routeReseller.put("/:id", updateReseller);
-routeReseller.put("/referral/code", setMyReferralCode);
+
 
 
 

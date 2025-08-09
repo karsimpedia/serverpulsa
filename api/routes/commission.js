@@ -6,7 +6,7 @@ import {
   listMyCommissionRules,
   upsertMyCommissionRule,
   deleteMyCommissionRule,
-} from "../controllers/commission";
+} from "../controllers/commission.js";
 
 routerCommisson.get("/", listMyCommissionRules);
 routerCommisson.post("/", upsertMyCommissionRule);

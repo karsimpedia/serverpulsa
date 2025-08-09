@@ -1,113 +1,210 @@
-/* eslint-disable no-console */
-import { PrismaClient } from '@prisma/client';
-import bcrypt from 'bcrypt';
+// prisma/seed.js
+import { PrismaClient } from "@prisma/client";
+import bcrypt from "bcrypt";
 
 const prisma = new PrismaClient();
 
-async function main() {
-  // Users
-  const adminPass = await bcrypt.hash('admin123', 10);
-  const resPass   = await bcrypt.hash('reseller123', 10);
-
-  const admin = await prisma.user.upsert({
-    where: { username: 'admin' },
-    update: {},
-    create: { username: 'admin', password: adminPass, role: 'ADMIN' },
+/* ===== Helpers Supplier / Endpoint / Mapping ===== */
+async function upsertSupplier(prisma, { code, name, status = "ACTIVE" }) {
+  return prisma.supplier.upsert({
+    where: { code },             // code unik
+    update: { name, status },
+    create: { code, name, status },
   });
-
-  const ures = await prisma.user.upsert({
-    where: { username: 'reseller1' },
-    update: {},
-    create: { username: 'reseller1', password: resPass, role: 'RESELLER' },
-  });
-
-  // Reseller + Saldo
-  const reseller = await prisma.reseller.upsert({
-    where: { userId: ures.id },
-    update: {},
-    create: {
-      userId: ures.id,
-      name: 'Reseller One',
-      apiKeyHash: await bcrypt.hash('RS-API-KEY-RESELLER1', 10),
-      saldo: { create: { amount: 5_000_000n } },
-    },
-    include: { saldo: true },
-  });
-
-const plan = await prisma.commissionPlan.upsert({
-  where: { name: 'Default Plan' },
-  update: {},
-  create: {
-    name: 'Default Plan',
-    base: 'MARGIN',   // komisi % berdasarkan margin
-    maxLevels: 3,
-    isActive: true
-  }
-});
-// level rules: L1=50%, L2=30%, L3=20% dari margin (contoh ekstrem)
-await prisma.commissionRule.createMany({
-  data: [
-    { planId: plan.id, level: 1, valueType: 'PERCENT', value: 50n },
-    { planId: plan.id, level: 2, valueType: 'PERCENT', value: 30n },
-    { planId: plan.id, level: 3, valueType: 'PERCENT', value: 20n },
-  ],
-  skipDuplicates: true
-});
-
-// assign ke semua reseller default
-await prisma.commissionPlanAssignment.upsert({
-  where: { resellerId: reseller.id }, // reseller dari seed kamu
-  update: { planId: plan.id },
-  create: { resellerId: reseller.id, planId: plan.id }
-});
-
-
-  // Supplier + Endpoint
-  const supXL = await prisma.supplier.upsert({
-    where: { code: 'XL' },
-    update: {},
-    create: { name: 'Supplier XL', code: 'XL', status: 'ACTIVE' },
-  });
-
-  await prisma.supplierEndpoint.createMany({
-    data: [
-      { supplierId: supXL.id, name: 'default', baseUrl: 'https://api.supplierxl.test', apiKey: 'XL-KEY', secret: 'XL-SECRET' },
-    ],
-    skipDuplicates: true,
-  });
-
-  // Produk
-  const pr5 = await prisma.product.upsert({
-    where: { code: 'XL5' },
-    update: {},
-    create: { code: 'XL5', name: 'XL 5K', type: 'PULSA', nominal: 5000, basePrice: 5200n, margin: 300n, isActive: true },
-  });
-
-  const pr10 = await prisma.product.upsert({
-    where: { code: 'XL10' },
-    update: {},
-    create: { code: 'XL10', name: 'XL 10K', type: 'PULSA', nominal: 10000, basePrice: 10200n, margin: 500n, isActive: true },
-  });
-
-  await prisma.supplierProduct.upsert({
-    where: { supplierId_productId: { supplierId: supXL.id, productId: pr5.id } },
-    update: { costPrice: 5100n, isAvailable: true, priority: 10 },
-    create: { supplierId: supXL.id, productId: pr5.id, supplierSku: 'XL-5', costPrice: 5100n, isAvailable: true, priority: 10 },
-  });
-
-  await prisma.supplierProduct.upsert({
-    where: { supplierId_productId: { supplierId: supXL.id, productId: pr10.id } },
-    update: { costPrice: 10050n, isAvailable: true, priority: 10 },
-    create: { supplierId: supXL.id, productId: pr10.id, supplierSku: 'XL-10', costPrice: 10050n, isAvailable: true, priority: 10 },
-  });
-
-  // Callback default reseller
-  await prisma.resellerCallback.create({
-    data: { resellerId: reseller.id, url: 'https://reseller1.test/callback', secret: 'CB-SECRET' },
-  });
-
-  console.log('✅ Seed selesai');
 }
 
-main().then(() => prisma.$disconnect())
-.catch(async (e) => { console.error(e); await prisma.$disconnect(); process.exit(1); });
+async function ensureEndpoint(prisma, { supplierId, name, baseUrl, apiKey = null, secret = null, isActive = true }) {
+  const existing = await prisma.supplierEndpoint.findFirst({ where: { supplierId, name } });
+  if (existing) {
+    return prisma.supplierEndpoint.update({
+      where: { id: existing.id },
+      data: { baseUrl, apiKey, secret, isActive },
+    });
+  }
+  return prisma.supplierEndpoint.create({
+    data: { supplierId, name, baseUrl, apiKey, secret, isActive },
+  });
+}
+
+async function upsertSupplierProduct(prisma, {
+  supplierCode, productCode, supplierSku, costPrice, isAvailable = true, priority = 100
+}) {
+  const [supplier, product] = await Promise.all([
+    prisma.supplier.findUnique({ where: { code: supplierCode }, select: { id: true } }),
+    prisma.product.findUnique({ where: { code: productCode }, select: { id: true } }),
+  ]);
+  if (!supplier) throw new Error(`Supplier code=${supplierCode} tidak ditemukan`);
+  if (!product)  throw new Error(`Product code=${productCode} tidak ditemukan`);
+
+  return prisma.supplierProduct.upsert({
+    where: { supplierId_productId: { supplierId: supplier.id, productId: product.id } }, // @@unique([supplierId, productId])
+    update: { supplierSku, costPrice: BigInt(costPrice), isAvailable, priority },
+    create: { supplierId: supplier.id, productId: product.id, supplierSku, costPrice: BigInt(costPrice), isAvailable, priority },
+  });
+}
+
+/* ===== Seed utama ===== */
+async function main() {
+  console.log("🚀 Starting seed...");
+
+  // Bersihkan DB (urut sesuai FK)
+  await prisma.supplierProduct.deleteMany();
+  await prisma.supplierEndpoint.deleteMany();
+  await prisma.transactionCommission?.deleteMany().catch(()=>{});
+  await prisma.transaction?.deleteMany().catch(()=>{});
+
+  await prisma.device.deleteMany();
+  await prisma.saldo.deleteMany();
+  await prisma.reseller.deleteMany();
+
+  await prisma.product.deleteMany();
+  await prisma.productCategory.deleteMany();
+
+  await prisma.user.deleteMany();
+  await prisma.supplier.deleteMany();
+
+  // Kategori (tanpa description)
+  const catPulsaXL = await prisma.productCategory.upsert({
+    where: { name: "PULSA REGULER XL" }, // pastikan name unik di schema
+    update: {},
+    create: { name: "PULSA REGULER XL" },
+  });
+  const catPulsaSimpati = await prisma.productCategory.upsert({
+    where: { name: "PULSA REGULER SIMPATI" },
+    update: {},
+    create: { name: "PULSA REGULER SIMPATI" },
+  });
+
+  // Produk (BigInt!)
+  const prodXL5 = await prisma.product.upsert({
+    where: { code: "XL5" },
+    update: {
+      name: "Pulsa XL 5K",
+      type: "PULSA",
+      nominal: 5000,
+      basePrice: 4800n,
+      margin: 200n,
+      isActive: true,
+      categoryId: catPulsaXL.id,
+    },
+    create: {
+      code: "XL5",
+      name: "Pulsa XL 5K",
+      type: "PULSA",
+      nominal: 5000,
+      basePrice: 4800n,
+      margin: 200n,
+      isActive: true,
+      categoryId: catPulsaXL.id,
+    },
+  });
+
+  const prodTSEL10 = await prisma.product.upsert({
+    where: { code: "TSEL10" },            // konsisten dengan mapping supplier nanti
+    update: {
+      name: "Pulsa Telkomsel 10K",
+      type: "PULSA",
+      nominal: 10000,
+      basePrice: 10050n,
+      margin: 500n,
+      isActive: true,
+      categoryId: catPulsaSimpati.id,
+    },
+    create: {
+      code: "TSEL10",
+      name: "Pulsa Telkomsel 10K",
+      type: "PULSA",
+      nominal: 10000,
+      basePrice: 10050n,
+      margin: 500n,
+      isActive: true,
+      categoryId: catPulsaSimpati.id,
+    },
+  });
+
+  // Suppliers
+  const supXL   = await upsertSupplier(prisma, { code: "SUP-XL",   name: "Supplier XL" });
+  const supTSEL = await upsertSupplier(prisma, { code: "SUP-TSEL", name: "Supplier Telkomsel" });
+
+  // Endpoints
+  await ensureEndpoint(prisma, {
+    supplierId: supXL.id,
+    name: "PRIMARY",
+    baseUrl: "https://dummy-supplier-xl.com/api",
+    apiKey: "apikey-xl",
+    secret: null,
+    isActive: true,
+  });
+  await ensureEndpoint(prisma, {
+    supplierId: supTSEL.id,
+    name: "PRIMARY",
+    baseUrl: "https://dummy-supplier-telkomsel.com/api",
+    apiKey: "apikey-telkomsel",
+    secret: null,
+    isActive: true,
+  });
+
+  // Mapping produk -> supplier (harga modal pemasok)
+  await upsertSupplierProduct(prisma, {
+    supplierCode: "SUP-XL",
+    productCode: "XL5",
+    supplierSku: "XL-5K",
+    costPrice: 4800n,
+    priority: 50,
+  });
+  await upsertSupplierProduct(prisma, {
+    supplierCode: "SUP-TSEL",
+    productCode: "TSEL10",
+    supplierSku: "TSEL-10K",
+    costPrice: 10050n,
+    priority: 50,
+  });
+
+  // User & Reseller (saldo 50.000)
+  const hashedPass = await bcrypt.hash("123456", 10);
+  const hashedPin  = await bcrypt.hash("123456", 10);
+
+  const userReseller = await prisma.user.upsert({
+    where: { username: "reseller1" },
+    update: { password: hashedPass, role: "RESELLER" },
+    create: { username: "reseller1", password: hashedPass, role: "RESELLER" },
+  });
+
+  // Pastikan tidak tabrakan id/unique
+  await prisma.reseller.deleteMany({ where: { OR: [{ userId: userReseller.id }, { id: "LA0003" }] } });
+
+  const reseller = await prisma.reseller.create({
+    data: {
+      id: "LA0003",
+      userId: userReseller.id,
+      name: "Reseller Demo",
+      apiKeyHash: "",
+      isActive: true,
+      referralCode: "LA0003", // samakan dengan id agar unik aman
+      pin: hashedPin,
+    },
+  });
+
+  await prisma.saldo.upsert({
+    where: { resellerId: reseller.id },
+    update: { amount: 50000n },
+    create: { resellerId: reseller.id, amount: 50000n },
+  });
+
+  await prisma.device.upsert({
+    where: { identifier: "081234567890" }, // asumsikan identifier unik
+    update: { resellerId: reseller.id, isActive: true },
+    create: { resellerId: reseller.id, type: "PHONE", identifier: "081234567890", isActive: true },
+  });
+
+  console.log("✅ Seed selesai!");
+}
+
+main()
+  .catch((e) => {
+    console.error("❌ Seed error:", e);
+    process.exit(1);
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });

@@ -4,8 +4,8 @@ import prisma from "../prisma.js";
 import { trxQueue } from '../../queues.js';
 import bcrypt from "bcrypt";
 export async function createTopup(req, res) {
-  const { productCode, msisdn, refId, pin } = req.body;
-  const resellerId = req.reseller.id;
+  const { productCode, msisdn, refId, pin, } = req.body;
+  const resellerId = req.body.resellerId ;
 
   if (!productCode || !msisdn) {
     return res.status(400).json({ error: "productCode & msisdn wajib." });
@@ -110,11 +110,11 @@ export async function createTopup(req, res) {
           },
         });
 
-        await tx.saldo.update({
+     const saldo=   await tx.saldo.update({
           where: { resellerId },
           data: { amount: saldo.amount - (sellPrice + adminFee) },
         });
-
+ console.log(saldo)
         await tx.mutasiSaldo.create({
           data: {
             resellerId,

@@ -1,6 +1,30 @@
 // api/controllers/product.js
 import prisma from "../prisma.js";
 
+
+export async function upsertCategory(req, res) {
+  try {
+    let { name, code } = req.body;
+    if (!name) return res.status(400).json({ error: "Nama kategori wajib diisi" });
+
+    name = name.trim().toUpperCase();
+    if (code) code = code.trim().toUpperCase();
+
+    const category = await prisma.productCategory.upsert({
+      where: { name },
+      update: { code },
+      create: { name, code },
+    });
+
+    return res.status(200).json({ data: category });
+  } catch (err) {
+    console.error("Upsert kategori gagal:", err);
+    return res.status(500).json({ error: "Upsert kategori gagal" });
+  }
+}
+
+
+
 /** Helper: konversi BigInt ke Number untuk kirim ke client */
 function toPlainProduct(p) {
   if (!p) return p;
@@ -17,22 +41,32 @@ function toPlainProducts(rows) {
 // Tambah produk
 export async function createProduct(req, res) {
   try {
-    const { code, name, type, nominal, basePrice, margin, isActive } = req.body;
+    let { code, name, type, nominal, basePrice, margin, isActive } = req.body;
 
     if (!code || !name || !type || basePrice == null) {
       return res.status(400).json({ error: "Field wajib: code,name,type,basePrice" });
     }
+
+    // Normalisasi code: trim + uppercase
+    code = String(code).trim().toUpperCase();
+
     // Validasi enum ProductType
     const allowedTypes = ["PULSA", "TAGIHAN"];
     if (!allowedTypes.includes(type)) {
       return res.status(400).json({ error: "type harus PULSA atau TAGIHAN" });
     }
 
+    // (Opsional) Cek cepat sebelum insert
+    const existed = await prisma.product.findUnique({ where: { code } });
+    if (existed) {
+      return res.status(409).json({ error: "Kode produk sudah terpakai." });
+    }
+
     const prod = await prisma.product.create({
       data: {
         code,
         name,
-        type, // enum ProductType
+        type,
         nominal: nominal ?? null,
         basePrice: BigInt(basePrice),
         margin: BigInt(margin ?? 0),
@@ -40,12 +74,75 @@ export async function createProduct(req, res) {
       },
     });
 
-    return res.json({ data: toPlainProduct(prod) });
+    return res.status(201).json({ data: toPlainProduct(prod) });
   } catch (e) {
+    // Tangkap unique constraint dari Prisma (double safety)
+    if (e.code === "P2002" && e.meta?.target?.includes("code")) {
+      return res.status(409).json({ error: "Kode produk sudah terpakai." });
+    }
     console.error("Tambah produk gagal:", e);
     return res.status(500).json({ error: "Tambah produk gagal" });
   }
 }
+
+
+
+export async function upsertProduct(req, res) {
+  try {
+    let { code, name, type, nominal, basePrice, margin, isActive, categoryId, categoryName } = req.body;
+
+    if (!code || !name || !type || basePrice == null) {
+      return res.status(400).json({ error: "Field wajib: code,name,type,basePrice" });
+    }
+
+    code = String(code).trim().toUpperCase();
+    const allowedTypes = ["PULSA", "TAGIHAN"];
+    if (!allowedTypes.includes(type)) {
+      return res.status(400).json({ error: "type harus PULSA atau TAGIHAN" });
+    }
+
+    // Kalau user kirim categoryName → buat/upsert kategori
+    if (!categoryId && categoryName) {
+      const cat = await prisma.productCategory.upsert({
+        where: { name: categoryName.trim().toUpperCase() },
+        update: {},
+        create: { name: categoryName.trim().toUpperCase() },
+      });
+      categoryId = cat.id;
+    }
+
+    const prod = await prisma.product.upsert({
+      where: { code },
+      update: {
+        name,
+        type,
+        nominal: nominal ?? null,
+        basePrice: BigInt(basePrice),
+        margin: BigInt(margin ?? 0),
+        isActive: isActive ?? true,
+        categoryId: categoryId || null,
+      },
+      create: {
+        code,
+        name,
+        type,
+        nominal: nominal ?? null,
+        basePrice: BigInt(basePrice),
+        margin: BigInt(margin ?? 0),
+        isActive: isActive ?? true,
+        categoryId: categoryId || null,
+      },
+      include: { category: true },
+    });
+
+    return res.status(200).json({ data: prod });
+  } catch (e) {
+    console.error("Upsert produk gagal:", e);
+    return res.status(500).json({ error: "Upsert produk gagal" });
+  }
+}
+
+
 
 // Get all products
 export async function getAllProducts(_req, res) {
