@@ -60,58 +60,69 @@ async function settlement(trxId) {
   const trx = await prisma.transaction.findUnique({ where: { id: trxId } });
   if (!trx) return;
 
-  // status terminal
   const terminal = ['SUCCESS', 'FAILED', 'REFUNDED', 'CANCELED', 'EXPIRED'];
   if (!terminal.includes(trx.status)) return;
 
-  // Refund jika gagal/batal/kedaluwarsa
   if (['FAILED', 'CANCELED', 'EXPIRED'].includes(trx.status)) {
     const need = BigInt(trx.sellPrice ?? 0n) + BigInt(trx.adminFee ?? 0n);
-    if (need > 0n) {
-      // sudah pernah refund?
-      const refunded = await prisma.mutasiSaldo.findFirst({
-        where: { trxId: trx.id, type: 'REFUND' },
+    if (need <= 0n) return;
+
+    await prisma.$transaction(async (tx) => {
+      // 🔒 Kunci baris saldo via update dummy agar aman dari race
+      const cur = await tx.saldo.update({
+        where: { resellerId: trx.resellerId },
+        data: {}, // no-op update, tapi mengunci row
+        select: { amount: true },
+      }).catch(async (e) => {
+        // jika belum ada saldo, buat dulu lalu ambil (tetap mengunci)
+        await tx.saldo.create({ data: { resellerId: trx.resellerId, amount: 0n } });
+        return tx.saldo.update({
+          where: { resellerId: trx.resellerId },
+          data: {},
+          select: { amount: true },
+        });
+      });
+
+      // ❗ Cek REFUND per trx+type (butuh @@unique([trxId,type]))
+      const exist = await tx.mutasiSaldo.findUnique({
+        where: { MutasiSaldo_trxId_type_key: { trxId: trx.id, type: 'REFUND' } },
         select: { id: true },
       });
-      if (!refunded) {
-        await prisma.$transaction(async (tx) => {
-          // ambil saldo sebelum
-          const saldoRow = await tx.saldo.findUnique({
-            where: { resellerId: trx.resellerId },
-            select: { amount: true },
-          });
-          const before = saldoRow?.amount ?? 0n;
-          const after  = before + need;
+      if (exist) return; // sudah pernah refund, selesai
 
-          // kembalikan saldo (atomic)
-          await tx.saldo.update({
-            where: { resellerId: trx.resellerId },
-            data: { amount: { increment: need } },
-          });
+      // Baru lakukan credit sekali saja
+      const updated = await tx.saldo.update({
+        where: { resellerId: trx.resellerId },
+        data: { amount: { increment: need } },
+        select: { amount: true },
+      });
+      const afterAmount = updated.amount;
+      const beforeAmount = afterAmount - need;
 
-          // catat mutasi REFUND (lengkap dengan source & before/after)
-          await tx.mutasiSaldo.create({
-            data: {
-              // gunakan ID mutasi yang unik, jangan pakai trx.id lagi bila sudah dipakai untuk HOLD
-              trxId: `MREF-${Date.now()}-${randomUUID().slice(0,8)}`,
-              resellerId: trx.resellerId,
-              type: 'REFUND',
-              source: 'REFUND_TRX',          // ⬅️ WAJIB, isi reason/source
-              amount: need,                  // konvensi: positif
-              beforeAmount: before,
-              afterAmount: after,
-              note: `Refund ${trx.invoiceId}`,
-              status: 'SUCCESS',
-            },
-          });
-        });
-        console.log(`↩️  Refund selesai (${trx.invoiceId})`);
+      await tx.mutasiSaldo.create({
+        data: {
+          trxId: trx.id,
+          resellerId: trx.resellerId,
+          type: 'REFUND',
+          source: 'REFUND_TRX',
+          amount: need,
+          beforeAmount,
+          afterAmount,
+          note: `Refund ${trx.invoiceId}`,
+          reference: trx.supplierRef || trx.invoiceId,
+        },
+      });
+    }).catch((e) => {
+      // Jika masih dapat unique di sini, biarkan lewat (idempoten)
+      if (!/Unique constraint failed|duplicate key value/i.test(String(e.message))) {
+        throw e;
       }
-    }
-  }
+    });
 
-  // TODO: payout komisi ketika SUCCESS (nanti)
+    console.log(`↩️  Refund selesai (${trx.invoiceId})`);
+  }
 }
+
 
 
 // ========== Handlers ==========

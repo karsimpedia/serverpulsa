@@ -7,10 +7,12 @@ import { connection, QUEUE_NAME, trxQueue } from '../queues.js';
 
 const { Worker } = pkg;
 
+const QNAME = QUEUE_NAME || 'trxQueue';
+
 console.log('🚀 Worker transaksi start …');
 
 const worker = new Worker(
-  QUEUE_NAME, // pastikan sama dengan QUEUE_NAME di queues.js (default: 'trxQueue')
+  QNAME,
   async (job) => {
     const { name, data } = job;
 
@@ -23,12 +25,16 @@ const worker = new Worker(
   { connection }
 );
 
+// ---- event logs
 worker.on('completed', (job) => console.log(`🎯 ${job.name}(${job.id}) done`));
 worker.on('failed', (job, err) => console.error(`💥 ${job?.name}(${job?.id}) failed:`, err?.message));
 
 // -------- utils
 const toNum = (v) => (v == null ? null : Number(v));
 
+/**
+ * Ambil supplier-product yang available + endpoint aktif dengan prioritas/cost terendah.
+ */
 async function pickSupplierWithEndpoint(productId) {
   const list = await prisma.supplierProduct.findMany({
     where: { productId, isAvailable: true, supplier: { status: 'ACTIVE' } },
@@ -42,6 +48,94 @@ async function pickSupplierWithEndpoint(productId) {
   return null;
 }
 
+/**
+ * Helper: pastikan saldo record ada; kalau tidak ada, buat 0.
+ */
+async function ensureSaldo(tx, resellerId) {
+  const cur = await tx.saldo.findUnique({ where: { resellerId }, select: { resellerId: true } });
+  if (cur) return cur;
+  return tx.saldo.create({ data: { resellerId, amount: 0n } });
+}
+
+/**
+ * Helper: CREDIT (tambah saldo) atomic dengan before/after.
+ * amount harus BigInt positif.
+ */
+async function createMutasiCredit(
+  tx,
+  { trxId, resellerId, amount, type = 'CREDIT', source, note, reference }
+) {
+  await ensureSaldo(tx, resellerId);
+  const updated = await tx.saldo.update({
+    where: { resellerId },
+    data: { amount: { increment: BigInt(amount) } },
+    select: { amount: true },
+  });
+  const afterAmount = updated.amount;
+  const beforeAmount = afterAmount - BigInt(amount);
+
+  return tx.mutasiSaldo.create({
+    data: {
+      trxId,
+      resellerId,
+      type, // enum, mis: 'REFUND' | 'CREDIT'
+      source, // mis: 'REFUND_TRX'
+      amount: BigInt(amount),
+      beforeAmount,
+      afterAmount,
+      note: note ?? null,
+      reference: reference ?? null,
+      // status: SUCCESS (default di schema)
+    },
+  });
+}
+
+/**
+ * Helper: DEBIT (kurangi saldo) atomic dengan before/after.
+ * amount harus BigInt positif.
+ * Jika perlu validasi saldo cukup, tambahkan cekBalance=true.
+ */
+async function createMutasiDebit(
+  tx,
+  { trxId, resellerId, amount, type = 'DEBIT', source, note, reference, cekBalance = false }
+) {
+  await ensureSaldo(tx, resellerId);
+
+  if (cekBalance) {
+    const cur = await tx.saldo.findUnique({ where: { resellerId }, select: { amount: true } });
+    if ((cur?.amount ?? 0n) < BigInt(amount)) {
+      throw new Error('Saldo tidak cukup untuk debit.');
+    }
+  }
+
+  const updated = await tx.saldo.update({
+    where: { resellerId },
+    data: { amount: { decrement: BigInt(amount) } },
+    select: { amount: true },
+  });
+  const afterAmount = updated.amount;
+  const beforeAmount = afterAmount + BigInt(amount);
+
+  return tx.mutasiSaldo.create({
+    data: {
+      trxId,
+      resellerId,
+      type, // 'DEBIT'
+      source, // mis: 'ORDER_DEBIT'
+      amount: BigInt(amount),
+      beforeAmount,
+      afterAmount,
+      note: note ?? null,
+      reference: reference ?? null,
+    },
+  });
+}
+
+/**
+ * Settlement terminal transaksi:
+ * - FAILED/CANCELED/EXPIRED => REFUND (CREDIT) kalau belum pernah
+ * - SUCCESS => (opsional) payout komisi
+ */
 async function settlement(trxId) {
   const trx = await prisma.transaction.findUnique({ where: { id: trxId } });
   if (!trx) return;
@@ -51,20 +145,30 @@ async function settlement(trxId) {
 
   if (['FAILED', 'CANCELED', 'EXPIRED'].includes(trx.status)) {
     const need = BigInt(trx.sellPrice ?? 0n) + BigInt(trx.adminFee ?? 0n);
-    const refunded = await prisma.mutasiSaldo.findFirst({ where: { trxId: trx.id, type: 'REFUND' } });
+
+    // Jika kamu pakai @@unique([trxId, type]) maka satu REFUND per trx.
+    const refunded = await prisma.mutasiSaldo.findFirst({
+      where: { trxId: trx.id, type: 'REFUND' },
+      select: { id: true },
+    });
+
     if (!refunded && need > 0n) {
       await prisma.$transaction(async (tx) => {
-        const saldo = await tx.saldo.findUnique({ where: { resellerId: trx.resellerId } });
-        await tx.saldo.update({ where: { resellerId: trx.resellerId }, data: { amount: (saldo?.amount ?? 0n) + need } });
-        await tx.mutasiSaldo.create({
-          data: { resellerId: trx.resellerId, trxId: trx.id, amount: need, type: 'REFUND', note: `Refund ${trx.invoiceId}` },
+        await createMutasiCredit(tx, {
+          trxId: trx.id,
+          resellerId: trx.resellerId,
+          amount: need,
+          type: 'REFUND',
+          source: 'REFUND_TRX',
+          note: `Refund ${trx.invoiceId}`,
+          reference: trx.supplierRef || trx.invoiceId,
         });
       });
       console.log(`↩️  Refund selesai (${trx.invoiceId})`);
     }
   }
 
-  // TODO: payout komisi saat SUCCESS (kalau sudah ada rule)
+  // TODO: payout komisi saat SUCCESS (jika sudah ada rule komisi)
 }
 
 // -------- handlers
@@ -97,7 +201,7 @@ async function handleDispatchTopup(trxId) {
       data: {
         status: normalized,
         supplierId: sp.supplierId,
-        supplierRef: data?.supplierRef ?? data?.ref ?? trx.supplierRef,
+        supplierRef: data?.supplierRef ?? data?.ref ?? trx.supplierRef ?? trx.invoiceId,
         supplierPayload: { endpoint: url, request: body },
         supplierResult: data,
       },
@@ -115,7 +219,7 @@ async function handleDispatchTopup(trxId) {
         status: 'FAILED',
         supplierId: sp.supplierId,
         supplierPayload: { endpoint: url, request: body },
-        supplierResult: { error: String(err) },
+        supplierResult: { error: String(err?.message || err) },
       },
     });
     await settlement(trx.id);
@@ -222,13 +326,13 @@ async function handleDispatchPaybill(trxId) {
   } catch (err) {
     await prisma.transaction.update({
       where: { id: trx.id },
-      data: { status: 'FAILED', supplierResult: { error: String(err) }, supplierPayload: { endpoint: url, request: body } },
+      data: { status: 'FAILED', supplierResult: { error: String(err?.message || err) }, supplierPayload: { endpoint: url, request: body } },
     });
     await settlement(trx.id);
   }
 }
 
-// -------- shutdown
+// -------- graceful shutdown
 process.on('SIGINT', async () => {
   console.log('SIGINT received. Closing worker…');
   await worker.close();

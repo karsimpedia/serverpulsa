@@ -144,7 +144,7 @@ model Saldo {
 
 model MutasiSaldo {
   id           String        @id @default(uuid())
-  trxId        String        @unique
+  trxId        String       
   resellerId   String
   type         MutasiType
   source       String        // contoh: "MANUAL_TOPUP", "REFUND", dll
