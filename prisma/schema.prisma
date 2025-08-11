@@ -261,7 +261,7 @@ model Transaction {
   updatedAt       DateTime          @updatedAt
   expiresAt       DateTime?
   externalRefId   String?
-
+  message         String?
   reseller Reseller @relation(fields: [resellerId], references: [id])
   product  Product  @relation(fields: [productId], references: [id])
 

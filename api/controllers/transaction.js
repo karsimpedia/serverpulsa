@@ -36,7 +36,8 @@ function normalizeStatuses(q) {
  */
 export async function listTransactions(req, res) {
   try {
-    const resellerId = req.reseller.id;
+    // const resellerId = req.reseller.id;
+   const resellerId = req.params.id
     const take = Math.min(Number(req.query.take || 20), 100);
     const skip = Number(req.query.skip || 0);
     const statuses = normalizeStatuses(req.query.status);

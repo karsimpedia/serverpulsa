@@ -10,12 +10,12 @@ import {
 const router = express.Router();
 
 // Dashboard ringkas (counts + latest)
-router.get("/dashboard", authReseller, dashboardTransactions);
+router.get("/dashboard", dashboardTransactions);
 
 // List transaksi (filter, paging)
-router.get("/", authReseller, listTransactions);
+router.get("/",  listTransactions);
 
 // SSE stream untuk auto refresh dashboard
-router.get("/stream", authReseller, streamTransactions);
+router.get("/stream",  streamTransactions);
 
 export default router;
