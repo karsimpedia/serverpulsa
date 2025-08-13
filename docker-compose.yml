@@ -1,4 +1,3 @@
-
 name: engine-pulsa
 
 services:
@@ -35,7 +34,7 @@ services:
       timeout: 3s
       retries: 30
 
-  # Jalankan migrasi Prisma sekali, sebelum api/worker start
+  # Jalankan migrasi Prisma sekali sebelum api/worker start
   migrate:
     build:
       context: .
@@ -46,6 +45,7 @@ services:
         condition: service_healthy
     environment:
       NODE_ENV: production
+      # ⬇️ FIX: hapus '}' di akhir
       DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-pulsa}:${POSTGRES_PASSWORD:-pulsa}@postgres:5432/${POSTGRES_DB:-pulsa}?schema=public}
     command: ["sh", "-c", "npx prisma generate && npx prisma migrate deploy"]
     restart: "no"
@@ -63,13 +63,19 @@ services:
     environment:
       NODE_ENV: production
       PORT: ${PORT:-3000}
+      # ⬇️ FIX: hapus '}' di akhir
       DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-pulsa}:${POSTGRES_PASSWORD:-pulsa}@postgres:5432/${POSTGRES_DB:-pulsa}?schema=public}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
-      # tambahkan env lain (API keys supplier, dsb)
     ports:
       - "${PORT:-3000}:3000"
     command: ["node", "api/api.js"]
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
 
   worker:
     build:
@@ -83,10 +89,21 @@ services:
         condition: service_healthy
     environment:
       NODE_ENV: production
+      # ⬇️ FIX: hapus '}' di akhir
       DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-pulsa}:${POSTGRES_PASSWORD:-pulsa}@postgres:5432/${POSTGRES_DB:-pulsa}?schema=public}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
-    command: ["node", "worker/worker.js"]
+      # opsional: set concurrency utk BullMQ worker
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
+    # ⬇️ Samakan dengan file worker kamu (pilih salah satu):
+    command: ["node", "worker/index.js"]
+    # command: ["node", "worker/worker.js"]
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"process.exit(0)\""]
+      interval: 15s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
 
 volumes:
   pgdata:

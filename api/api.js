@@ -12,7 +12,7 @@ import { setupRealtimeBridge } from "./realtime-subscriber.js";
 
 import monitorRoutes from "./routes/monitor.js";         // ← untuk /api/admin/transactions & /stats
 import authReseller from "./middleware/authReseller.js";
-import routerTopup from "./routes/topup.js";
+
 import { createBullBoard } from "@bull-board/api";
 import { BullMQAdapter } from "@bull-board/api/bullMQAdapter.js";
 import { ExpressAdapter } from "@bull-board/express";
@@ -22,9 +22,9 @@ import routerProduct from "./routes/product.js";
 import routeReseller from "./routes/reseller.js";
 import routerSuplier from "./routes/supplier.js";
 import transactionRoutes from "./routes/transaction.js";
-import billingRoutes from "./routes/billing.js";
+import trxRoutes from "./routes/topupInqPay.js";
 import referralRoutes from "./routes/referral.js";
-import trxDetailRoutes from "./routes/transactionDetail.js";
+
 import categoryRoutes from "./routes/category.js";
 import authRoutes from "./routes/auth.js";
 import adminRoute from "./routes/admin.js";
@@ -98,17 +98,16 @@ app.use("/bull", serverAdapter.getRouter());
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoute);
 app.use("/api/admin", monitorRoutes);           // ← penting: aktifkan monitor (transactions & stats)
-app.use("/api/topup", routerTopup);
-app.use("/api/trx", trxDetailRoutes);
+app.use("/api/trx", trxRoutes);
 app.use("/api/transactions", transactionRoutes);
 app.use("/api/reseller", routeReseller);
 app.use("/api/commission/rules", authReseller, routerCommisson);
 app.use("/api/products", routerProduct);
 app.use("/api/suppliers", routerSuplier);
 app.use("/api/referral", referralRoutes);
-app.use("/api/billing", billingRoutes);
-app.use("/api/category", categoryRoutes);
 
+app.use("/api/category", categoryRoutes);
+app.get('/health', (req,res)=>res.json({ ok:true }));
 /** =========================
  *  Admin utilities
  *  ======================== */

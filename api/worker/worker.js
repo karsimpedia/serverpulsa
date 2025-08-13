@@ -5,6 +5,8 @@ import pkg from 'bullmq';
 import prisma from '../api/prisma.js';
 import { connection, QUEUE_NAME, trxQueue } from '../../queues.js';
 import { randomUUID } from "crypto"; // ⬅️ di atas file
+
+import { pickSupplierWithEndpoint } from '../../utils/supplierPicker.js';
 const { Worker } = pkg;
 
 console.log('🚀 Worker transaksi start …');

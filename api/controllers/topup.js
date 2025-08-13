@@ -1,197 +1,191 @@
 // api/controllers/topup.js
 import prisma from "../prisma.js";
-
-import { trxQueue } from "../../queues.js";
 import bcrypt from "bcrypt";
-export async function createTopup(req, res) {
-  const { productCode, msisdn, refId, pin } = req.body;
-  const resellerId = req.body.resellerId;
+import { trxQueue } from "../../queues.js";
+import { pickSupplierForProduct } from "../lib/supplier-pick.js";
+import { computeEffectiveSellPrice } from "../lib/effective-price.js";
+import { genInvoiceId } from "../lib/invoice-id.js";
 
-  if (!productCode || !msisdn) {
-    return res.status(400).json({ error: "productCode & msisdn wajib." });
-  }
-  if (!pin) {
-    return res.status(400).json({ error: "PIN wajib." });
-  }
-  if (!/^\d{6}$/.test(String(pin))) {
-    return res.status(400).json({ error: "PIN harus 6 digit angka." });
-  }
+const onlyDigits = (s = "") => String(s).replace(/[^\d]/g, "");
+const getClientIp = (req) =>
+  (Array.isArray(req.headers["x-forwarded-for"])
+    ? req.headers["x-forwarded-for"][0]
+    : (req.headers["x-forwarded-for"] || "")).toString().split(",")[0].trim() ||
+  req.ip ||
+  null;
+
+export async function createTopup(req, res) {
   try {
-    // 0) Verifikasi PIN reseller
+    const {
+      resellerId,
+      productCode,
+      msisdn,         // wajib
+      externalRefId,
+      pin,
+      deviceType,     // wajib
+      identifier,     // wajib (deviceId)
+    } = req.body;
+
+    // ===== validasi input dasar =====
+    if (!resellerId || !productCode || !msisdn || !pin || !deviceType || !identifier) {
+      return res.status(400).json({
+        error: "Data tidak lengkap. resellerId, productCode, msisdn, pin, deviceType, dan identifier wajib diisi.",
+      });
+    }
+    if (!/^\d{6}$/.test(String(pin))) {
+      return res.status(400).json({ error: "PIN harus 6 digit angka." });
+    }
+
+    const destMsisdn = onlyDigits(msisdn);
+    if (!destMsisdn) {
+      return res.status(422).json({ error: "Nomor tujuan tidak valid." });
+    }
+const typeDevice = String(deviceType ?? '')
+  .trim()
+  .toUpperCase();
+    // ===== validasi device terdaftar & aktif =====
+    const allowedDevice = await prisma.device.findFirst({
+      where: {
+        resellerId,
+        type: String(typeDevice),
+        identifier: String(identifier),
+        isActive: true,
+      },
+      select: { id: true, resellerId: true },
+    });
+    if (!allowedDevice) {
+      return res.status(403).json({ error: "Device tidak diizinkan untuk melakukan transaksi." });
+    }
+    if (allowedDevice.resellerId !== resellerId) {
+      return res.status(403).json({ error: "Tidak diizinkan memakai device ini." });
+    }
+
+    // ===== reseller aktif + verifikasi PIN =====
     const reseller = await prisma.reseller.findUnique({
       where: { id: resellerId },
-      select: { id: true, pin: true, isActive: true },
+      select: { id: true, isActive: true, pin: true },
     });
     if (!reseller || !reseller.isActive) {
-      return res.status(403).json({ error: "Reseller tidak aktif." });
+      return res.status(403).json({ error: "Reseller tidak aktif" });
     }
-    if (!reseller.pin) {
-      return res.status(403).json({ error: "PIN belum diset. Hubungi admin." });
-    }
-    const okPin = await bcrypt.compare(String(pin), reseller.pin);
-    if (!okPin) {
-      return res.status(403).json({ error: "PIN salah." });
-    }
-    // 0) Ambil product lebih dulu (perlu productId untuk limit)
-    const product = await prisma.product.findUnique({
-      where: { code: productCode },
-    });
+    const pinOK = await bcrypt.compare(String(pin), reseller.pin || "");
+    if (!pinOK) return res.status(403).json({ error: "PIN salah" });
+
+    // ===== produk by code =====
+    const product = await prisma.product.findUnique({ where: { code: productCode } });
     if (!product || !product.isActive) {
-      return res.status(400).json({ error: "Produk tidak tersedia." });
+      return res.status(404).json({ error: "Produk tidak ditemukan atau tidak aktif." });
     }
 
-    // 1) Jika ada refId → idempotensi per reseller
-    if (refId) {
-      const existingByRef = await prisma.transaction.findFirst({
-        where: { resellerId, externalRefId: refId },
-        select: { invoiceId: true, status: true },
-      });
-      if (existingByRef) {
-        return res.json({
-          invoiceId: existingByRef.invoiceId,
-          status: existingByRef.status,
-          reused: true,
-        });
-      }
-      // tidak ada → lanjut (refId baru = bypass limit)
-    } else {
-      // 2) TANPA refId → batasi 1 jam untuk KOMBINASI (productCode + msisdn) per reseller
-      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-      const blockingStatuses = ["PENDING", "PROCESSING", "SUCCESS"];
-
-      const recent = await prisma.transaction.findFirst({
-        where: {
-          resellerId,
-          productId: product.id, // ← per produk
-          msisdn, // ← per nomor
-          createdAt: { gt: oneHourAgo },
-          status: { in: blockingStatuses },
-        },
-        select: { createdAt: true, invoiceId: true, status: true },
-      });
-
-      if (recent) {
-        const elapsedMs = Date.now() - new Date(recent.createdAt).getTime();
-        const remainingMs = Math.max(0, 60 * 60 * 1000 - elapsedMs);
-        const remainingMin = Math.ceil(remainingMs / 60000);
-
-        return res.status(429).json({
-          error:
-            "Tanpa refId, topup ke kombinasi produk+nomor ini dibatasi 1x per 1 jam.",
-          detail: { productCode, msisdn },
-          retryAfterMinutes: remainingMin,
-          lastInvoiceId: recent.invoiceId,
-          lastStatus: recent.status,
-          tip: "Kirim refId unik di body untuk mengizinkan multiple topup di jam yang sama.",
-        });
-      }
+    // ===== pilih supplier =====
+    const supplierPick = await pickSupplierForProduct(product.id);
+    if (!supplierPick) {
+      return res.status(503).json({ error: "Tidak ada supplier aktif untuk produk ini" });
     }
+    const { supplier, endpoint, supplierProduct } = supplierPick;
 
-    // 3) Validasi saldo & harga
-    const saldo = await prisma.saldo.findUnique({ where: { resellerId } });
-    if (!saldo)
-      return res.status(400).json({ error: "Saldo tidak ditemukan." });
-
-    const sellPrice = BigInt(product.basePrice) + BigInt(product.margin);
+    // ===== harga & hold =====
+    const { effectiveSell } = await computeEffectiveSellPrice(reseller.id, product.id);
+    const sellPrice = effectiveSell; // BigInt
     const adminFee = 0n;
-    if (saldo.amount < sellPrice + adminFee) {
-      return res.status(400).json({ error: "Saldo tidak cukup." });
+    const holdAmount = sellPrice + adminFee;
+
+    // ===== idempoten via externalRefId =====
+    if (externalRefId) {
+      const dup = await prisma.transaction.findUnique({
+        where: { resellerId_externalRefId: { resellerId, externalRefId } },
+      });
+      if (dup) {
+        // catat lastSeen device walau transaksi di-reuse
+        await prisma.device.updateMany({
+          where: { resellerId, type: String(deviceType), identifier: String(identifier) },
+          data: { lastSeenAt: new Date(), lastIp: getClientIp(req) },
+        });
+        return res.json({ ok: true, reused: true, trxId: dup.id, status: dup.status });
+      }
     }
 
-    // 4) Buat transaksi + hold saldo
-    const invoiceId = `TRX-${Date.now()}`;
+    const invoiceId = genInvoiceId();
+    let created;
+    const clientInfo = {
+      identifier: String(identifier).slice(0, 128),
+      deviceId: String(identifier).slice(0, 128),
+      deviceType: String(deviceType).slice(0, 32),
+      ip: getClientIp(req),
+      userAgent: req.get("user-agent") || null,
+    };
 
-    try {
-      const trx = await prisma.$transaction(async (tx) => {
-        // ambil ulang saldo di dalam transaksi (hindari race)
-        const saldoRow = await tx.saldo.findUnique({
-          where: { resellerId },
-          select: { amount: true },
-        });
-        if (!saldoRow) throw new Error("SALDO_NOT_FOUND");
+    // ===== transaksi: HOLD saldo + create trx =====
+    await prisma.$transaction(async (tx) => {
+      const current = (await tx.saldo.findUnique({ where: { resellerId: reseller.id } }))?.amount ?? 0n;
+      if (current < holdAmount) throw new Error("Saldo tidak cukup");
 
-        const holdAmount =
-          BigInt(String(product.basePrice)) +
-          BigInt(String(product.margin)) +
-          0n; // = sellPrice + adminFee
-        if (saldoRow.amount < holdAmount)
-          throw new Error("INSUFFICIENT_BALANCE");
+      const after = current - holdAmount;
 
-        // buat transaksi dulu
-        const created = await tx.transaction.create({
-          data: {
-            invoiceId,
-            resellerId,
-            productId: product.id,
-            msisdn,
-            sellPrice:
-              BigInt(String(product.basePrice)) +
-              BigInt(String(product.margin)),
-            adminFee: 0n,
-            status: "PENDING",
-            externalRefId: refId ?? null,
-            expiresAt: new Date(Date.now() + 5 * 60 * 1000),
-          },
-        });
-
-        const beforeAmount = saldoRow.amount;
-        const afterAmount = beforeAmount - holdAmount;
-
-        // update saldo: atomic decrement
-        await tx.saldo.update({
-          where: { resellerId },
-          data: { amount: { decrement: holdAmount } },
-        });
-
-        // catat mutasi (pakai nilai positif untuk amount; tipe=DEBIT sudah menjelaskan arah)
-        await tx.mutasiSaldo.create({
-          data: {
-            trxId: created.id,
-            resellerId,
-            type: "DEBIT",
-            source: "HOLD_TRX",
-            amount: holdAmount,
-            beforeAmount,
-            afterAmount,
-            note: `Hold saldo untuk ${invoiceId}`,
-            status: "SUCCESS",
-          },
-        });
-
-        return created;
+      await tx.saldo.upsert({
+        where: { resellerId: reseller.id },
+        create: { resellerId: reseller.id, amount: after },
+        update: { amount: after },
       });
 
-      // 5) Enqueue ke worker
-      await trxQueue.add(
-        "dispatch",
-        { trxId: trx.id },
-        { removeOnComplete: true, removeOnFail: true }
-      );
-      return res.json({ invoiceId, status: "PENDING" });
-    } catch (e) {
-      if (e.message === "INSUFFICIENT_BALANCE") {
-        return res.status(400).json({ error: "Saldo tidak cukup." });
-      }
-      if (e.message === "SALDO_NOT_FOUND") {
-        return res.status(400).json({ error: "Saldo tidak ditemukan." });
-      }
-      // race condition pada refId
-      if (e.code === "P2002" && refId) {
-        const dup = await prisma.transaction.findFirst({
-          where: { resellerId, externalRefId: refId },
-          select: { invoiceId: true, status: true },
-        });
-        if (dup)
-          return res.json({
-            invoiceId: dup.invoiceId,
-            status: dup.status,
-            reused: true,
-          });
-      }
-      throw e;
-    }
+      await tx.mutasiSaldo.create({
+        data: {
+          trxId: invoiceId, // sementara; setelah create trx akan di-update
+          resellerId: reseller.id,
+          type: "DEBIT",
+          source: "TRX_HOLD",
+          amount: holdAmount,
+          beforeAmount: current,
+          afterAmount: after,
+          note: `Hold untuk ${product.code}/${destMsisdn} [${clientInfo.deviceType}:${clientInfo.deviceId}]`,
+          status: "SUCCESS",
+        },
+      });
+
+      created = await tx.transaction.create({
+        data: {
+          invoiceId,
+          resellerId: reseller.id,
+          productId: product.id,
+          msisdn: destMsisdn,
+          sellPrice,
+          adminFee,
+          status: "PENDING",
+          supplierId: supplier.id,
+          supplierRef: null,
+          supplierPayload: {
+            endpointId: endpoint.id,
+            baseUrl: endpoint.baseUrl,
+            supplierSku: supplierProduct.supplierSku,
+            costPrice: supplierProduct.costPrice,
+            client: clientInfo, // audit device/ip/UA
+          },
+          externalRefId,
+          message: "PENDING (queued)",
+        },
+      });
+
+      await tx.mutasiSaldo.updateMany({
+        where: { trxId: invoiceId, resellerId: reseller.id, source: "TRX_HOLD" },
+        data: { trxId: created.id },
+      });
+
+      // update lastSeen device
+      await tx.device.updateMany({
+        where: { resellerId, type: String(deviceType), identifier: String(identifier) },
+        data: { lastSeenAt: new Date(), lastIp: clientInfo.ip },
+      });
+    });
+
+    // ===== enqueue ke worker =====
+    await trxQueue.add(
+      "trx",
+      { op: "topup", trxId: created.id },
+      { attempts: 2, backoff: { type: "exponential", delay: 3000 } }
+    );
+
+    return res.json({ ok: true, trxId: created.id, invoiceId, status: "PENDING" });
   } catch (e) {
-    console.error("Create topup error:", e);
-    return res.status(500).json({ error: "Gagal membuat transaksi." });
+    return res.status(400).json({ error: e?.message || "Gagal membuat transaksi" });
   }
 }

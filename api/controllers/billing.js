@@ -3,10 +3,11 @@ import axios from "axios";
 import prisma from "../prisma.js";
 import { trxQueue } from "../../queues.js";
 import bcrypt from "bcrypt";
-// ==== Util BigInt-safe ====
+import { computeEffectiveSellPrice } from "../lib/effective-price.js"; // base + sum(markup)
+
 const toNum = (v) => (v == null ? null : Number(v));
 
-// ==== Supplier picker (mirip worker) ====
+// ==== Supplier picker ====
 async function pickSupplierWithEndpoint(productId) {
   const list = await prisma.supplierProduct.findMany({
     where: {
@@ -37,14 +38,14 @@ async function supplierInquiry(ep, sp, { invoiceId, customerNo }) {
   };
 
   try {
-    const { data } = await axios.post(url, body, { headers, timeout: 10000 });
-    // Normalisasi hasil inquiry (silakan sesuaikan dengan supplier nyata)
-    // Harapkan: { status:'OK', amount, adminFee, customerName, period, supplierRef }
+    const { data } = await axios.post(url, body, { headers, timeout: 15000 });
+    // Normalisasi hasil inquiry (silakan sesuaikan dg supplier nyata)
+    // Ekspektasi: { status:'OK', amount, customerName, period, supplierRef, supplierFee }
     return {
       ok: true,
       raw: data,
       amount: BigInt(data.amount ?? 0),
-      adminFee: BigInt(data.adminFee ?? 0),
+      supplierFee: BigInt(data.supplierFee ?? 0), // biaya supplier jika ada (biaya ke vendor)
       customerName: data.customerName ?? null,
       period: data.period ?? null,
       supplierRef: data.supplierRef ?? data.ref ?? null,
@@ -70,7 +71,6 @@ export async function inquiryBill(req, res) {
       return res.status(400).json({ error: "Produk tagihan tidak tersedia." });
     }
 
-    // pilih supplier + endpoint
     const picked = await pickSupplierWithEndpoint(product.id);
     if (!picked) return res.status(503).json({ error: "Supplier tidak tersedia untuk produk ini." });
     const { sp, ep } = picked;
@@ -83,37 +83,63 @@ export async function inquiryBill(req, res) {
       return res.status(502).json({ error: "Gagal inquiry ke supplier.", detail: iq.error || iq.raw });
     }
 
-    // simpan TRANSACTION PENDING (tanpa hold saldo)
+    // --- Hitung harga customer berdasarkan markup chain ---
+    // baseAdminFee = product.margin (kebijakan admin)
+    const baseAdminFee = BigInt(product.margin ?? 0n);
+
+    // total markup berantai = effectiveSell(reseller) - (basePrice+margin)
+    const baseDefault = BigInt(product.basePrice || 0n) + BigInt(product.margin || 0n);
+    const { effectiveSell } = await computeEffectiveSellPrice(resellerId, product.id);
+    let markupSum = BigInt(effectiveSell) - baseDefault;
+    if (markupSum < 0n) markupSum = 0n;
+
+    // Harga final yang dibayar customer:
+    // sellPrice = amountDue + baseAdminFee + markupSum
+    const sellPrice = BigInt(iq.amount) + baseAdminFee + markupSum;
+
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+
+    // simpan TRANSACTION: TAGIHAN_INQUIRY (tidak hold saldo)
     const trx = await prisma.transaction.create({
       data: {
         invoiceId,
         resellerId,
         productId: product.id,
-        msisdn: customerNo,              // simpan no pelanggan di msisdn
-        sellPrice: 0n,                   // akan diisi saat pay
-        adminFee: iq.adminFee || 0n,
-        status: "PENDING",
+        msisdn: customerNo,     // simpan ID pelanggan di field msisdn
+        type: "TAGIHAN_INQUIRY",
+        sellPrice,              // harga final yg akan ditagih saat PAY
+        adminFee: baseAdminFee, // admin fee dasar kita (bukan biaya supplier)
+        markupSum,              // total markup berantai
+        amountDue: iq.amount,   // dari supplier
+        status: "QUOTED",
         supplierId: sp.supplierId,
         supplierRef: iq.supplierRef,
-        supplierPayload: { step: "INQUIRY", request: { productCode, customerNo } },
+        supplierPayload: {
+          step: "INQUIRY",
+          endpointId: ep.id,
+          baseUrl: ep.baseUrl,
+          supplierSku: sp.supplierSku,
+          supplierFee: iq.supplierFee,  // biaya vendor (bila ada) → untuk analitik/kontenjan
+          request: { productCode, customerNo },
+        },
         supplierResult: iq.raw,
         expiresAt,
+        message: iq.raw?.message || "OK",
       },
     });
 
-    const total = iq.amount + (iq.adminFee || 0n) + BigInt(product.margin || 0n);
-
     return res.json({
+      ok: true,
       invoiceId,
       customerNo,
       customerName: iq.customerName,
       period: iq.period,
-      amount: toNum(iq.amount),
-      adminFee: toNum(iq.adminFee),
-      productMargin: toNum(product.margin),
-      totalPay: toNum(total),
+      amountDue: toNum(iq.amount),
+      adminFee: toNum(baseAdminFee),
+      markupSum: toNum(markupSum),
+      sellPrice: toNum(sellPrice),
       expiresAt,
+      note: "Gunakan invoiceId ini untuk PAY dalam 5 menit.",
     });
   } catch (err) {
     console.error("inquiryBill error:", err);
@@ -122,21 +148,18 @@ export async function inquiryBill(req, res) {
 }
 
 // ==== Controller: BAYAR tagihan ====
-// body: { invoiceId }
+// body: { invoiceId, pin }
 export async function payBill(req, res) {
   try {
-    const { invoiceId , pin} = req.body;
+    const { invoiceId, pin } = req.body;
     const resellerId = req.reseller.id;
 
+    if (!pin) return res.status(400).json({ error: "PIN wajib." });
+    if (!/^\d{6}$/.test(String(pin))) {
+      return res.status(400).json({ error: "PIN harus 6 digit angka." });
+    }
 
-  if (!pin) {
-    return res.status(400).json({ error: "PIN wajib." });
-  }
-  if (!/^\d{6}$/.test(String(pin))) {
-    return res.status(400).json({ error: "PIN harus 6 digit angka." });
-  }
-
- // 0) Verifikasi PIN reseller
+    // Verifikasi PIN reseller
     const reseller = await prisma.reseller.findUnique({
       where: { id: resellerId },
       select: { id: true, pin: true, isActive: true },
@@ -161,76 +184,80 @@ export async function payBill(req, res) {
     if (!trx || trx.resellerId !== resellerId) {
       return res.status(404).json({ error: "Transaksi tidak ditemukan." });
     }
-    if (trx.status !== "PENDING") {
-      return res.status(400).json({ error: `Transaksi tidak dalam status PENDING (saat ini: ${trx.status}).` });
+    if (trx.type !== "TAGIHAN_INQUIRY") {
+      return res.status(400).json({ error: "invoiceId bukan transaksi inquiry tagihan." });
+    }
+    if (trx.status !== "QUOTED") {
+      return res.status(400).json({ error: `Transaksi tidak siap dibayar (status: ${trx.status}).` });
     }
     if (trx.expiresAt && trx.expiresAt.getTime() < Date.now()) {
-      // tandai expired
       await prisma.transaction.update({ where: { id: trx.id }, data: { status: "EXPIRED" } });
       return res.status(400).json({ error: "Transaksi sudah kedaluwarsa." });
     }
 
-    // Ambil nilai tagihan dari hasil inquiry yang disimpan
-    const amount = BigInt(trx.supplierResult?.amount ?? 0n);
-    const adminFeeInquiry = BigInt(trx.supplierResult?.adminFee ?? trx.adminFee ?? 0n);
-    const margin = BigInt(trx.product?.margin ?? 0n);
+    // Nilai final sudah disimpan saat inquiry
+    const sellPrice = BigInt(trx.sellPrice || 0n);
+    const adminFee = BigInt(trx.adminFee || 0n);
+    const totalNeed = sellPrice; // adminFee sudah termasuk dalam sellPrice (sellPrice = amountDue + baseAdminFee + markupSum)
 
-    const sellPrice = amount + margin;      // harga dasar + margin produk
-    const adminFee = adminFeeInquiry;       // fee dari inquiry
-
-    // Cek saldo & hold
+    // Cek & HOLD saldo
     const saldo = await prisma.saldo.findUnique({ where: { resellerId } });
     if (!saldo) return res.status(400).json({ error: "Saldo reseller tidak ditemukan." });
-
-    const need = sellPrice + adminFee;
-    if (saldo.amount < need) {
+    if (saldo.amount < totalNeed) {
       return res.status(400).json({ error: "Saldo tidak cukup untuk membayar tagihan." });
     }
 
-    // Hold saldo dan update trx (dalam satu transaksi DB)
+    // Update trx → TAGIHAN_PAY (PENDING), HOLD saldo, relink mutasi
     const updated = await prisma.$transaction(async (tx) => {
-      // update harga final (sellPrice/adminFee) + status tetap PENDING
+      // 1) Ubah tipe & status untuk dibayar
       const t = await tx.transaction.update({
         where: { id: trx.id },
         data: {
-          sellPrice,
-          adminFee,
-          // biarkan status PENDING; worker akan set PROCESSING/SUCCESS/FAILED
+          type: "TAGIHAN_PAY",
+          status: "PENDING",
+          // sellPrice/adminFee/markupSum/amountDue sudah ada dari inquiry
+          message: "PENDING (billing pay queued)"
         },
       });
 
+      // 2) HOLD saldo (DEBIT amount positif)
+      const before = saldo.amount;
+      const after = before - totalNeed;
+
       await tx.saldo.update({
         where: { resellerId },
-        data: { amount: saldo.amount - need },
+        data: { amount: after },
       });
 
       await tx.mutasiSaldo.create({
         data: {
           resellerId,
-          trxId: trx.id,
-          amount: -need,
+          trxId: trx.id,            // pakai id transaksi (bukan invoice) supaya gampang di-refund
           type: "DEBIT",
+          source: "TRX_HOLD",
+          amount: totalNeed,        // POSITIF
+          beforeAmount: before,
+          afterAmount: after,
           note: `Hold saldo untuk ${trx.invoiceId} (pembayaran tagihan)`,
+          status: "SUCCESS",
         },
       });
 
       return t;
     });
 
-    // enqueue job khusus bayar tagihan
-    await trxQueue.add(
-      "dispatch_paybill",
-      { trxId: updated.id },
-      { removeOnComplete: true, removeOnFail: true }
-    );
+    // enqueue job bayar tagihan
+ await trxQueue.add('trx', { op: 'paybill', trxId: updated.id }, { attempts: 2, backoff: { type: 'exponential', delay: 3000 } });
 
     return res.json({
+      ok: true,
       invoiceId,
+      type: "TAGIHAN_PAY",
       status: "PENDING",
-      amount: toNum(amount),
+      amountDue: toNum(trx.amountDue),
       adminFee: toNum(adminFee),
-      margin: toNum(margin),
-      totalHeld: toNum(need),
+      markupSum: toNum(trx.markupSum),
+      sellPrice: toNum(sellPrice),
       message: "Pembayaran diproses. Cek status berkala.",
     });
   } catch (err) {
@@ -239,7 +266,8 @@ export async function payBill(req, res) {
   }
 }
 
-
+// ==== (Opsional) Inquiry only (fallback cepat) ====
+// Mirip inquiryBill, tapi jika supplier lambat, tandai PROCESSING & bisa dipolling.
 export async function inquiryOnly(req, res) {
   try {
     const { productCode, customerNo } = req.body;
@@ -271,31 +299,43 @@ export async function inquiryOnly(req, res) {
 
     const raced = await Promise.race([payReq, timeout5s]);
 
+    // === Jalur TIMEOUT: simpan PROCESSING & enqueue worker inquiry ===
     if (raced === "TIMEOUT") {
-      // simpan transaksi PROCESSING (tanpa hold saldo) agar bisa dipantau/poll
-      const trx = await prisma.transaction.create({
+      const trxCreated = await prisma.transaction.create({
         data: {
           invoiceId,
           resellerId,
           productId: product.id,
-          msisdn: customerNo,          // pakai msisdn sbg customerNo
+          msisdn: customerNo,
+          type: "TAGIHAN_INQUIRY",
           sellPrice: 0n,
           adminFee: 0n,
+          markupSum: 0n,
+          amountDue: 0n,
           status: "PROCESSING",
           supplierId: sp.supplierId,
           supplierRef: null,
-          supplierPayload: { step: "INQUIRY", request: body },
+          supplierPayload: {
+            step: "INQUIRY",
+            request: body,
+            endpointId: ep.id,
+            baseUrl: ep.baseUrl,
+            supplierSku: sp.supplierSku
+          },
           supplierResult: { note: "Under processing (timeout 5s)" },
           expiresAt,
         },
       });
 
-      // (opsional) enqueue polling kalau worker kamu siap
-      try {
-        await trxQueue.add("poll_inquiry", { trxId: trx.id }, { delay: 10_000, removeOnComplete: true, removeOnFail: true });
-      } catch (_) {}
+      // enqueue worker untuk lanjutkan inquiry (failover-ready)
+      await trxQueue.add(
+        'trx',
+        { op: 'inquirybill', trxId: trxCreated.id },
+        { attempts: 2, backoff: { type: 'exponential', delay: 3000 } }
+      );
 
       return res.json({
+        ok: true,
         invoiceId,
         status: "PROCESSING",
         message: "Inquiry sedang diproses, silakan cek status berkala.",
@@ -303,41 +343,62 @@ export async function inquiryOnly(req, res) {
       });
     }
 
-    // Supplier balas cepat
+    // === Jalur SUPPLIER BALAS CEPAT ===
     const { data } = raced;
-    // Normalisasi: pastikan field berikut ada sesuai API supplier kamu
-    const responseOk = true; // bisa validasi flag dari supplier
     const amount = BigInt(data.amount ?? 0);
-    const adminFee = BigInt(data.adminFee ?? 0);
+    const supplierFee = BigInt(data.supplierFee ?? 0);
     const supplierRef = data.supplierRef ?? data.ref ?? null;
 
-    // simpan catatan inquiry (tetap PROCESSING, tanpa hold saldo)
-    await prisma.transaction.create({
+    // hitung baseAdminFee & markupSum untuk hint harga
+    const baseAdminFee = BigInt(product.margin ?? 0n);
+    const baseDefault = BigInt(product.basePrice || 0n) + BigInt(product.margin || 0n);
+    const { effectiveSell } = await computeEffectiveSellPrice(resellerId, product.id);
+    let markupSum = BigInt(effectiveSell) - baseDefault;
+    if (markupSum < 0n) markupSum = 0n;
+    const sellPrice = amount + baseAdminFee + markupSum;
+
+    const trxCreated = await prisma.transaction.create({
       data: {
         invoiceId,
         resellerId,
         productId: product.id,
         msisdn: customerNo,
-        sellPrice: 0n,
-        adminFee,
-        status: "PROCESSING", // tetap processing—ini cuma inquiry
+        type: "TAGIHAN_INQUIRY",
+        sellPrice,
+        adminFee: baseAdminFee,
+        markupSum,
+        amountDue: amount,
+        status: "QUOTED", // karena respons cepat, langsung QUOTED
         supplierId: sp.supplierId,
         supplierRef,
-        supplierPayload: { step: "INQUIRY", request: body },
+        supplierPayload: {
+          step: "INQUIRY",
+          request: body,
+          endpointId: ep.id,
+          baseUrl: ep.baseUrl,
+          supplierSku: sp.supplierSku,
+          supplierFee
+        },
         supplierResult: data,
         expiresAt,
       },
     });
 
+    // (opsional) kalau mau tetap konsisten lewat worker untuk normalisasi vendor lain,
+    // kamu bisa enqueue juga, tapi biasanya tidak perlu kalau sudah QUOTED.
+    // await trxQueue.add('trx', { op: 'inquirybill', trxId: trxCreated.id }, { attempts: 2, backoff: { type: 'exponential', delay: 3000 } });
+
     return res.json({
+      ok: true,
       invoiceId,
-      status: responseOk ? "OK" : "UNKNOWN",
+      status: "OK",
       customerNo,
       customerName: data.customerName ?? null,
       period: data.period ?? null,
-      amount: toNum(amount),
-      adminFee: toNum(adminFee),
-      productMargin: Number(product.margin ?? 0n),
+      amountDue: toNum(amount),
+      adminFee: toNum(baseAdminFee),
+      markupSum: toNum(markupSum),
+      sellPrice: toNum(sellPrice),
       supplierRef,
       expiresAt,
     });

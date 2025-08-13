@@ -105,22 +105,34 @@ export async function bulkMoveProducts(req, res) {
 
 export async function upsertCategory(req, res) {
   try {
-    let { name, code } = req.body;
-    if (!name) return res.status(400).json({ error: "Nama kategori wajib diisi." });
+    let { name, code, description } = req.body || {};
+    if (!code || !String(code).trim()) {
+      return res.status(400).json({ error: "Kode kategori wajib diisi." });
+    }
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ error: "Nama kategori wajib diisi." });
+    }
 
-    name = name.trim().toUpperCase();
-    if (code) code = code.trim().toUpperCase();
+    // Normalisasi
+    const norm = (v) => (v == null ? null : String(v).trim());
+    // kalau tidak pakai citext, paksa uppercase agar konsisten
+    code = norm(code).toUpperCase();
+    name = norm(name).toUpperCase();
+    description = norm(description);
 
     const category = await prisma.productCategory.upsert({
-      where: { name },
-      update: { code },
-      create: { name, code },
+      where: { code },                 // ← kunci uniknya di sini
+      update: { name, description },
+      create: { code, name, description },
     });
 
-    res.status(200).json({ data: category });
+    return res.status(200).json({ data: category });
   } catch (e) {
+    if (e.code === "P2002" && e.meta?.target?.includes("code")) {
+      return res.status(409).json({ error: "Kode kategori sudah digunakan." });
+    }
     console.error("upsertCategory:", e);
-    res.status(500).json({ error: "Gagal upsert kategori." });
+    return res.status(500).json({ error: "Gagal upsert kategori." });
   }
 }
 

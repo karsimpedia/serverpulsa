@@ -25,6 +25,9 @@ export async function upsertCategory(req, res) {
 
 
 
+
+
+
 /** Helper: konversi BigInt ke Number untuk kirim ke client */
 function toPlainProduct(p) {
   if (!p) return p;
@@ -41,49 +44,74 @@ function toPlainProducts(rows) {
 // Tambah produk
 export async function createProduct(req, res) {
   try {
-    let { code, name, type, nominal, basePrice, margin, isActive } = req.body;
+    let { code, name, type, nominal, basePrice, margin, isActive, categoryCode, categoryId } = req.body;
 
     if (!code || !name || !type || basePrice == null) {
       return res.status(400).json({ error: "Field wajib: code,name,type,basePrice" });
     }
 
-    // Normalisasi code: trim + uppercase
+    // Normalisasi
     code = String(code).trim().toUpperCase();
-
-    // Validasi enum ProductType
+    const _name = String(name).trim();
     const allowedTypes = ["PULSA", "TAGIHAN"];
     if (!allowedTypes.includes(type)) {
       return res.status(400).json({ error: "type harus PULSA atau TAGIHAN" });
     }
 
-    // (Opsional) Cek cepat sebelum insert
+    const _nominal = nominal == null || nominal === "" ? null : Number(nominal);
+    const _basePrice = BigInt(basePrice);
+    const _margin = BigInt(margin ?? 0);
+    const _isActive = typeof isActive === "boolean" ? isActive : true;
+
+    // Cek kode produk unik
     const existed = await prisma.product.findUnique({ where: { code } });
     if (existed) {
       return res.status(409).json({ error: "Kode produk sudah terpakai." });
     }
 
+    // Siapkan connect kategori (opsional)
+    let categoryConnect = undefined;
+    if (categoryId) {
+      categoryConnect = { connect: { id: String(categoryId) } };
+    } else if (categoryCode) {
+      const catCode = String(categoryCode).trim().toUpperCase();
+      const cat = await prisma.productCategory.findUnique({ where: { code: catCode } });
+      if (!cat) {
+        return res.status(404).json({ error: `Kategori dengan code "${catCode}" tidak ditemukan.` });
+      }
+      categoryConnect = { connect: { code: cat.code } }; // connect by unique code
+    }
+
     const prod = await prisma.product.create({
       data: {
         code,
-        name,
+        name: _name,
         type,
-        nominal: nominal ?? null,
-        basePrice: BigInt(basePrice),
-        margin: BigInt(margin ?? 0),
-        isActive: isActive ?? true,
+        nominal: _nominal,
+        basePrice: _basePrice,
+        margin: _margin,
+        isActive: _isActive,
+        ...(categoryConnect ? { category: categoryConnect } : {}),
+      },
+      include: {
+        category: { select: { id: true, code: true, name: true } },
       },
     });
 
     return res.status(201).json({ data: toPlainProduct(prod) });
   } catch (e) {
-    // Tangkap unique constraint dari Prisma (double safety)
     if (e.code === "P2002" && e.meta?.target?.includes("code")) {
       return res.status(409).json({ error: "Kode produk sudah terpakai." });
+    }
+    if (e.code === "P2025") {
+      // dependency not found (misal connect id tidak ada)
+      return res.status(404).json({ error: "Kategori tidak ditemukan." });
     }
     console.error("Tambah produk gagal:", e);
     return res.status(500).json({ error: "Tambah produk gagal" });
   }
 }
+
 
 
 
@@ -145,17 +173,60 @@ export async function upsertProduct(req, res) {
 
 
 // Get all products
-export async function getAllProducts(_req, res) {
+export async function getAllProducts(req, res) {
   try {
+    const includeParam = String(req.query.include || "");
+    const includeCategory = includeParam
+      .split(",")
+      .map(s => s.trim().toLowerCase())
+      .includes("category");
+
+    const groupBy = String(req.query.group || "").toLowerCase();
+    const groupByCategory = groupBy === "category";
+
     const products = await prisma.product.findMany({
       orderBy: { createdAt: "desc" },
+      include: includeCategory
+        ? { category: { select: { id: true, code: true, name: true } } }
+        : undefined,
     });
-    return res.json({ data: toPlainProducts(products) });
+
+    if (groupByCategory) {
+      // bentuk output: [{ key, label, items: Product[] }]
+      const map = new Map();
+      for (const p of products) {
+        const key = p.category?.code ?? "__NO_CAT__";
+        const label = p.category
+          ? `${p.category.name} — ${p.category.code}`
+          : "(Tanpa Kategori)";
+
+        if (!map.has(key)) map.set(key, { label, items: [] });
+        map.get(key).items.push(toPlainProduct(p, { includeCategory }));
+      }
+
+      const data = Array.from(map.entries())
+        .sort((a, b) => a[1].label.localeCompare(b[1].label))
+        .map(([key, grp]) => ({
+          key,
+          label: grp.label,
+          items: grp.items.sort((a, b) => a.code.localeCompare(b.code)),
+        }));
+
+      return res.json({ data });
+    }
+
+    // default: list flat
+    return res.json({
+      data: products.map(p => toPlainProduct(p, { includeCategory })),
+    });
   } catch (err) {
     console.error("Fetch products error:", err);
     return res.status(500).json({ error: "Terjadi kesalahan pada server." });
   }
 }
+
+
+
 
 // Get single product by ID
 export async function getProduct(req, res) {

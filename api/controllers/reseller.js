@@ -99,7 +99,7 @@ async function nextResellerId(tx) {
 
 export const registerReseller = async (req, res) => {
   try {
-    const { name, username, password, referralCode, pin, phonenumber } = req.body;
+    const { name, username, password, referralCode, pin, phonenumber , address} = req.body;
     if (!name || !username || !password || !phonenumber) {
       return res.status(400).json({ error: "Name, username, password, dan phone number wajib diisi." });
     }
@@ -152,6 +152,7 @@ export const registerReseller = async (req, res) => {
           referralCode: normalizeCode(newId),
           pin: pinHashed,
           parentId: parent?.id ?? null,
+          address
         },
       });
 

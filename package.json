@@ -4,9 +4,9 @@
   "type": "module",
   "scripts": {
     "api": "node api/api.js",
-    "worker": "node worker/worker.js",
+    "worker": "node worker/index.js",
     "dev:api": "nodemon api/api.js",
-    "dev:worker": "nodemon worker/worker.js",
+    "dev:worker": "nodemon worker/index.js",
     "generate": "prisma generate",
     "migrate": "prisma migrate dev --name init",
     "seed": "node prisma/seed.js",
