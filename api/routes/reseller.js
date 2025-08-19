@@ -12,8 +12,8 @@ routeReseller.post("/register",registerReseller);
 routeReseller.get("/", resellerList);
 routeReseller.post("/callback",  createResellerCallback);
 
-routeReseller.get("/saldo",authReseller, getSaldo);
-routeReseller.get("/mutasi",authReseller, getMutasi);
+routeReseller.get("/saldo/:id", getSaldo);
+routeReseller.get("/mutasi/:id", getMutasi);
 
 // Update reseller by ID
 routeReseller.put("/:id", updateReseller);

@@ -1,7 +1,73 @@
-import { PrismaClient } from "@prisma/client";
-const prisma = new PrismaClient();
 
-// POST /api/category  { name, code? }
+//api/controllers/category
+
+// GET /api/category/resolve?msisdn=...
+// POST /api/category/resolve { msisdn }
+import prisma from "../prisma.js";
+
+function normalizeMsisdn(input = "") {
+  const digits = String(input).replace(/[^\d]/g, "");
+  if (!digits) return "";
+  return digits.startsWith("62") ? "0" + digits.slice(2) : digits;
+}
+function makePrefixCandidates(msisdn, { min = 3, max = 8 } = {}) {
+  const out = [];
+  const upTo = Math.min(max, msisdn.length);
+  for (let len = min; len <= upTo; len++) out.push(msisdn.slice(0, len));
+  return out;
+}
+
+export async function listCategoriesByPrefix(req, res) {
+  try {
+    const raw = req.method === "GET" ? req.query.msisdn : req.body?.msisdn;
+    const msisdn = normalizeMsisdn(raw);
+
+    if (!msisdn) return res.status(400).json({ error: "msisdn wajib diisi." });
+    if (msisdn.length < 3)
+      return res.status(400).json({ error: "msisdn terlalu pendek." });
+
+    const candidates = makePrefixCandidates(msisdn, { min: 3, max: 8 });
+
+    // Ambil semua prefix yang cocok + kategori terkait
+    const hits = await prisma.productCategoryPrefix.findMany({
+      where: { prefix: { in: candidates } },
+      select: {
+        prefix: true,
+        category: {
+          select: {
+            id: true,
+            code: true,
+            name: true,
+            description: true,
+            createdAt: true,
+          },
+        },
+      },
+    });
+
+    // Urutkan dari prefix terpanjang → terpendek, lalu dedup kategori (unik per id)
+    hits.sort((a, b) => b.prefix.length - a.prefix.length);
+    const seen = new Set();
+    const categories = [];
+    for (const h of hits) {
+      const c = h.category;
+      if (!c) continue;
+      if (seen.has(c.id)) continue;
+      seen.add(c.id);
+      categories.push(c);
+    }
+
+    return res.json({
+      input: { raw, normalized: msisdn },
+      candidates,
+      category: categories, // <- sesuai format yang kamu inginkan
+    });
+  } catch (e) {
+    console.error("listCategoriesByPrefix:", e);
+    return res.status(500).json({ error: "Gagal menentukan kategori dari prefix." });
+  }
+}
+
 
 
 
@@ -102,10 +168,11 @@ export async function bulkMoveProducts(req, res) {
 }
 
 
-
 export async function upsertCategory(req, res) {
   try {
-    let { name, code, description } = req.body || {};
+    let { name, code, description, prefix, prefixes } = req.body || {};
+
+    // validasi dasar
     if (!code || !String(code).trim()) {
       return res.status(400).json({ error: "Kode kategori wajib diisi." });
     }
@@ -113,30 +180,138 @@ export async function upsertCategory(req, res) {
       return res.status(400).json({ error: "Nama kategori wajib diisi." });
     }
 
-    // Normalisasi
+    // normalisasi field utama
     const norm = (v) => (v == null ? null : String(v).trim());
-    // kalau tidak pakai citext, paksa uppercase agar konsisten
-    code = norm(code).toUpperCase();
-    name = norm(name).toUpperCase();
+    code = norm(code)?.toUpperCase();
+    name = norm(name)?.toUpperCase();
     description = norm(description);
 
-    const category = await prisma.productCategory.upsert({
-      where: { code },                 // ← kunci uniknya di sini
-      update: { name, description },
-      create: { code, name, description },
+    // ambil raw prefix (boleh prefix string, array, atau 'prefixes')
+    const raw = prefixes ?? prefix ?? [];
+
+    // normalisasi prefix → array { prefix, length }
+    const toDigits = (s) => String(s || "").replace(/[^\d]/g, "");
+    function parseRawPrefixes(input) {
+      let arr = [];
+      if (typeof input === "string") {
+        // dukung dipisah koma/newline/titik koma: "0817, 0877;0895"
+        arr = input
+          .split(/[,\n;]+/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+      } else if (Array.isArray(input)) {
+        arr = input;
+      } else if (input) {
+        // objek tunggal
+        arr = [input];
+      }
+
+      const out = [];
+      for (const it of arr) {
+        if (typeof it === "string") {
+          const p = toDigits(it);
+          if (p) out.push({ prefix: p, length: p.length });
+        } else if (it && typeof it === "object") {
+          const p = toDigits(it.prefix);
+          if (p) {
+            let len = Number(it.length ?? p.length);
+            if (!Number.isFinite(len) || len <= 0) len = p.length;
+            if (len > 32) len = 32; // batas wajar
+            out.push({ prefix: p, length: len });
+          }
+        }
+      }
+
+      // dedup per prefix (pakai yang terakhir)
+      const map = new Map();
+      for (const r of out) map.set(r.prefix, r);
+      return Array.from(map.values());
+    }
+
+    const desired = parseRawPrefixes(raw);
+
+    const result = await prisma.$transaction(async (tx) => {
+      // upsert kategori (unik by code)
+      const category = await tx.productCategory.upsert({
+        where: { code },
+        update: { name, description },
+        create: { code, name, description },
+      });
+
+      // ambil prefix existing
+      const existing = await tx.productCategoryPrefix.findMany({
+        where: { categoryId: category.id },
+        select: { id: true, prefix: true },
+      });
+
+      const desiredSet = new Set(desired.map((d) => d.prefix));
+
+      // hapus yang tidak diinginkan lagi
+      const idsToDelete = existing
+        .filter((e) => !desiredSet.has(e.prefix))
+        .map((e) => e.id);
+
+      if (idsToDelete.length) {
+        await tx.productCategoryPrefix.deleteMany({
+          where: { id: { in: idsToDelete } },
+        });
+      }
+
+      // upsert yang baru / update length
+      for (const d of desired) {
+        await tx.productCategoryPrefix.upsert({
+          // gunakan unique compound @@unique([categoryId, prefix])
+          where: {
+            categoryId_prefix: { categoryId: category.id, prefix: d.prefix },
+          },
+          update: { length: d.length },
+          create: {
+            categoryId: category.id,
+            prefix: d.prefix,
+            length: d.length,
+          },
+        });
+      }
+
+      // hasil akhir
+      const prefixesFinal = await tx.productCategoryPrefix.findMany({
+        where: { categoryId: category.id },
+        orderBy: { prefix: "asc" },
+      });
+
+      return { category, prefixes: prefixesFinal };
     });
 
-    return res.status(200).json({ data: category });
+    return res.json({ data: result });
   } catch (e) {
-    if (e.code === "P2002" && e.meta?.target?.includes("code")) {
-      return res.status(409).json({ error: "Kode kategori sudah digunakan." });
+    // tangani error unik prisma bila perlu
+    if (e && e.code === "P2002") {
+      const tgt = Array.isArray(e.meta?.target)
+        ? e.meta.target.join(",")
+        : e.meta?.target;
+      if (tgt?.includes("code")) {
+        return res.status(409).json({ error: "Kode kategori sudah digunakan." });
+      }
+      if (tgt?.includes("name")) {
+        return res.status(409).json({ error: "Nama kategori sudah digunakan." });
+      }
+      if (tgt?.includes("categoryId_prefix")) {
+        return res
+          .status(409)
+          .json({ error: "Prefix sudah ada pada kategori ini." });
+      }
     }
-    console.error("upsertCategory:", e);
+
+    console.error("upsertCategory error:", e);
     return res.status(500).json({ error: "Gagal upsert kategori." });
   }
 }
 
+
+
 // GET /api/category?page=&limit=
+
+
 export async function listCategories(req, res) {
   try {
     const page  = Math.max(parseInt(req.query.page ?? "1"), 1);
@@ -145,17 +320,34 @@ export async function listCategories(req, res) {
 
     const [rows, total] = await Promise.all([
       prisma.productCategory.findMany({
-        skip, take: limit,
+        skip,
+        take: limit,
         orderBy: { createdAt: "desc" },
         include: {
-          _count: { select: { products: true } }, // hitung jumlah produk
+          _count: { select: { products: true } },
+          // ambil hanya kolom prefix supaya ringan
+          prefixes: {
+            select: { prefix: true },
+            orderBy: { prefix: "asc" },
+          },
         },
       }),
       prisma.productCategory.count(),
     ]);
 
+    // ubah prefixes dari [{prefix:"0817"}, ...] -> ["0817", ...]
+    const data = rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      code: r.code,
+      description: r.description,
+      createdAt: r.createdAt,
+      _count: r._count,
+      prefixes: (r.prefixes || []).map((p) => p.prefix),
+    }));
+
     res.json({
-      data: rows,
+      data,
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
     });
   } catch (e) {
@@ -238,5 +430,129 @@ export async function deleteCategory(req, res) {
   } catch (e) {
     console.error("deleteCategory:", e);
     res.status(500).json({ error: "Gagal menghapus kategori." });
+  }
+}
+
+
+
+// ====================== PREFIX KATEGORI ======================
+
+// GET /api/category/:id/prefixes
+export async function listCategoryPrefixes(req, res) {
+  try {
+    const { id } = req.params;
+    const cat = await prisma.productCategory.findUnique({
+      where: { id },
+      select: { id: true, name: true },
+    });
+    if (!cat) return res.status(404).json({ error: "Kategori tidak ditemukan." });
+
+    const rows = await prisma.productCategoryPrefix.findMany({
+      where: { categoryId: id },
+      orderBy: [{ length: "desc" }, { prefix: "asc" }],
+    });
+
+    res.json({ category: cat, data: rows });
+  } catch (e) {
+    console.error("listCategoryPrefixes:", e);
+    res.status(500).json({ error: "Gagal mengambil prefix kategori." });
+  }
+}
+
+// POST /api/category/:id/prefixes/bulk
+// body: { prefixes: string[] }  -> contoh: ["0817","0818","0819"]
+export async function bulkAddCategoryPrefixes(req, res) {
+  try {
+    const { id } = req.params;
+    const cat = await prisma.productCategory.findUnique({ where: { id }, select: { id: true } });
+    if (!cat) return res.status(404).json({ error: "Kategori tidak ditemukan." });
+
+    let { prefixes = [] } = req.body || {};
+    if (!Array.isArray(prefixes)) prefixes = [];
+
+    const cleaned = prefixes
+      .map((p) => String(p || "").replace(/\D/g, ""))
+      .filter((p) => p.length >= 3 && p.length <= 5);
+
+    if (cleaned.length === 0) {
+      return res.status(400).json({ error: "Tidak ada prefix valid (3–5 digit)." });
+    }
+
+    const ops = cleaned.map((pref) =>
+      prisma.productCategoryPrefix.upsert({
+        where: { categoryId_prefix: { categoryId: id, prefix: pref } },
+        create: { categoryId: id, prefix: pref, length: pref.length },
+        update: {},
+      })
+    );
+
+    const result = await prisma.$transaction(ops);
+    res.json({ addedOrKept: result.length, data: result });
+  } catch (e) {
+    // P2002 duplikat unique (harusnya tertangani oleh upsert)
+    console.error("bulkAddCategoryPrefixes:", e);
+    res.status(500).json({ error: "Gagal menambahkan prefix." });
+  }
+}
+
+// PUT /api/category/:id/prefixes
+// body: { prefixes: string[] } -> replace semua prefix kategori (idempotent)
+export async function replaceCategoryPrefixes(req, res) {
+  try {
+    const { id } = req.params;
+    const cat = await prisma.productCategory.findUnique({ where: { id }, select: { id: true } });
+    if (!cat) return res.status(404).json({ error: "Kategori tidak ditemukan." });
+
+    let { prefixes = [] } = req.body || {};
+    if (!Array.isArray(prefixes)) prefixes = [];
+
+    const cleaned = Array.from(
+      new Set(
+        prefixes
+          .map((p) => String(p || "").replace(/\D/g, ""))
+          .filter((p) => p.length >= 3 && p.length <= 5)
+      )
+    );
+
+    await prisma.$transaction(async (tx) => {
+      await tx.productCategoryPrefix.deleteMany({ where: { categoryId: id } });
+      if (cleaned.length) {
+        await tx.productCategoryPrefix.createMany({
+          data: cleaned.map((pref) => ({
+            categoryId: id,
+            prefix: pref,
+            length: pref.length,
+          })),
+          skipDuplicates: true,
+        });
+      }
+    });
+
+    const rows = await prisma.productCategoryPrefix.findMany({
+      where: { categoryId: id },
+      orderBy: [{ length: "desc" }, { prefix: "asc" }],
+    });
+
+    res.json({ replaced: true, count: rows.length, data: rows });
+  } catch (e) {
+    console.error("replaceCategoryPrefixes:", e);
+    res.status(500).json({ error: "Gagal mengganti prefix kategori." });
+  }
+}
+
+// DELETE /api/category/:id/prefixes/:prefixId
+export async function deleteCategoryPrefix(req, res) {
+  try {
+    const { id, prefixId } = req.params;
+    // pastikan prefix memang milik kategori tsb
+    const row = await prisma.productCategoryPrefix.findUnique({ where: { id: prefixId } });
+    if (!row || row.categoryId !== id) {
+      return res.status(404).json({ error: "Prefix tidak ditemukan di kategori ini." });
+    }
+    await prisma.productCategoryPrefix.delete({ where: { id: prefixId } });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("deleteCategoryPrefix:", e);
+    res.status(500).json({ error: "Gagal menghapus prefix." });
   }
 }

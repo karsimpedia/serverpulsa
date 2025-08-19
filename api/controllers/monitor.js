@@ -19,12 +19,46 @@ export async function listTransactions(req, res) {
     const pageSize = toInt(req.query.pageSize || req.query.limit, 50);
     const status = req.query.status?.toUpperCase();
     const search = (req.query.search || "").trim();
-    const dateFrom = req.query.dateFrom ? new Date(req.query.dateFrom) : null;
-    const dateTo = req.query.dateTo ? new Date(req.query.dateTo) : null;
     const sort = safeSort(req.query.sort || "createdAt");
     const order = (req.query.order || "desc").toLowerCase() === "asc" ? "asc" : "desc";
 
-    // Cari productId yang code-nya match (tanpa mengandalkan relasi di where)
+    // ====== Normalisasi tanggal ======
+    // Helper: buat start-of-day & end-of-day (pakai timezone server)
+    const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
+    const endOfDay   = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
+
+    // Parse query date (bisa "2025-08-19" atau ISO lengkap)
+    const parseDate = (v) => {
+      if (!v) return null;
+      const d = new Date(v);
+      return isNaN(d.getTime()) ? null : d;
+    };
+
+    let dateFrom = parseDate(req.query.dateFrom);
+    let dateTo   = parseDate(req.query.dateTo);
+
+    // Default: jika keduanya tidak ada -> filter HARI INI
+    if (!dateFrom && !dateTo) {
+      const today = new Date();
+      dateFrom = startOfDay(today);
+      dateTo   = endOfDay(today);
+    } else {
+      // Jika hanya dateFrom dikirim tanpa waktu -> jadikan awal hari tsb
+      if (dateFrom && req.query.dateFrom && !req.query.dateFrom.includes("T")) {
+        dateFrom = startOfDay(dateFrom);
+      }
+      // Jika hanya dateTo dikirim tanpa waktu -> jadikan akhir hari tsb
+      if (dateTo && req.query.dateTo && !req.query.dateTo.includes("T")) {
+        dateTo = endOfDay(dateTo);
+      }
+      // Jika hanya salah satu yang ada, biarkan sebagai batas terbuka di sisi lainnya
+      // tapi kalau user kirim dateFrom > dateTo, tukar supaya valid
+      if (dateFrom && dateTo && dateFrom > dateTo) {
+        const tmp = dateFrom; dateFrom = dateTo; dateTo = tmp;
+      }
+    }
+
+    // ====== Cari productId by code (untuk pencarian cepat) ======
     let productIdsByCode = [];
     if (search) {
       try {
@@ -39,21 +73,25 @@ export async function listTransactions(req, res) {
       }
     }
 
+    // ====== Build where ======
     const where = {};
     if (status) where.status = status;
+
     if (search) {
       where.OR = [
-        { msisdn: { contains: search, mode: "insensitive" } },
-        { invoiceId: { contains: search, mode: "insensitive" } },
+        { msisdn:   { contains: search, mode: "insensitive" } },
+        { invoiceId:{ contains: search, mode: "insensitive" } },
       ];
       if (productIdsByCode.length) where.OR.push({ productId: { in: productIdsByCode } });
     }
+
     if (dateFrom || dateTo) {
       where.createdAt = {};
       if (dateFrom) where.createdAt.gte = dateFrom;
-      if (dateTo) where.createdAt.lte = dateTo;
+      if (dateTo)   where.createdAt.lte = dateTo;
     }
 
+    // ====== Query utama ======
     const [total, rows] = await Promise.all([
       prisma.transaction.count({ where }),
       prisma.transaction.findMany({
@@ -65,21 +103,21 @@ export async function listTransactions(req, res) {
           id: true,
           invoiceId: true,
           resellerId: true,
-          supplierId: true,   // hanya ID — nama di-lookup di bawah
+          supplierId: true,
           productId: true,
           msisdn: true,
-          sellPrice: true,    // BigInt
-          adminFee: true,     // BigInt
+          sellPrice: true,   // BigInt
+          adminFee: true,    // BigInt
           status: true,
-        //   message: true,
+          message: true,
           createdAt: true,
           updatedAt: true,
-          product: { select: { code: true } }, // relasi product ada di model kamu
+          product: { select: { code: true } },
         },
       }),
     ]);
 
-    // Lookup nama supplier berdasarkan supplierId (karena tdk ada relasi di model)
+    // ====== Lookup nama supplier (tanpa relasi) ======
     const supplierIds = [...new Set(rows.map((r) => r.supplierId).filter(Boolean))];
     let supplierMap = {};
     if (supplierIds.length) {
@@ -94,6 +132,7 @@ export async function listTransactions(req, res) {
       }
     }
 
+    // ====== Bentuk payload ======
     const data = rows.map((r) => ({
       id: r.id,
       invoiceId: r.invoiceId,
@@ -102,8 +141,7 @@ export async function listTransactions(req, res) {
       supplierName: supplierMap[r.supplierId] ?? null,
       productCode: r.product?.code ?? null,
       msisdn: r.msisdn,
-      // kirim sebagai number agar mudah dipakai UI (BigInt -> Number)
-      amount: Number(r.sellPrice ?? 0),
+      amount: Number(r.sellPrice ?? 0),  // UI-friendly
       price: Number(r.sellPrice ?? 0),
       adminFee: Number(r.adminFee ?? 0),
       status: r.status,
@@ -112,12 +150,22 @@ export async function listTransactions(req, res) {
       updatedAt: r.updatedAt,
     }));
 
-    res.json({ page, pageSize, total, pages: Math.ceil(total / pageSize), data });
+    res.json({
+      page,
+      pageSize,
+      total,
+      pages: Math.ceil(total / pageSize),
+      // Info range yang dipakai (berguna untuk debug UI)
+      usedDateFrom: dateFrom ?? null,
+      usedDateTo: dateTo ?? null,
+      data,
+    });
   } catch (err) {
     console.error("listTransactions error:", err);
     res.status(500).json({ error: "Gagal memuat transaksi." });
   }
 }
+
 
 /**
  * GET /api/admin/transactions/stats
@@ -125,8 +173,25 @@ export async function listTransactions(req, res) {
  */
 export async function transactionStats(req, res) {
   try {
-    const dateFrom = req.query.dateFrom ? new Date(req.query.dateFrom) : null;
-    const dateTo = req.query.dateTo ? new Date(req.query.dateTo) : null;
+    // const dateFrom = req.query.dateFrom ? new Date(req.query.dateFrom) : null;
+    // const dateTo = req.query.dateTo ? new Date(req.query.dateTo) : null;
+
+
+
+    let dateFrom = req.query.dateFrom ? new Date(req.query.dateFrom) : null;
+let dateTo = req.query.dateTo ? new Date(req.query.dateTo) : null;
+
+if (!dateFrom && !dateTo) {
+  const today = new Date();
+  dateFrom = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 0, 0, 0);
+  dateTo = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59);
+}
+
+if (dateFrom || dateTo) {
+  where.createdAt = {};
+  if (dateFrom) where.createdAt.gte = dateFrom;
+  if (dateTo) where.createdAt.lte = dateTo;
+}
 
     const where = {};
     if (dateFrom || dateTo) {

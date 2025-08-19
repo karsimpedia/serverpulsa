@@ -1,15 +1,20 @@
-//api/routes/commission.js
+// api/routes/commission.js
+import { Router } from "express";
 
-import express from "express";
-const routerCommisson = express.Router();
 import {
-  listMyCommissionRules,
-  upsertMyCommissionRule,
-  deleteMyCommissionRule,
+  getMyCommissionOverview,
+  listMyCommissionMutations,
+  listMyTransactionCommissions,
+  postMyCommissionPayout,
 } from "../controllers/commission.js";
 
-routerCommisson.get("/", listMyCommissionRules);
-routerCommisson.post("/", upsertMyCommissionRule);
-routerCommisson.delete("/", deleteMyCommissionRule);
+const r = Router();
 
-export default routerCommisson;
+
+
+r.get("/me/overview", getMyCommissionOverview);
+r.get("/me/mutations", listMyCommissionMutations);
+r.get("/me/ledger", listMyTransactionCommissions);
+r.post("/me/payout", postMyCommissionPayout);
+
+export default r;

@@ -24,11 +24,11 @@ import routerSuplier from "./routes/supplier.js";
 import transactionRoutes from "./routes/transaction.js";
 import trxRoutes from "./routes/topupInqPay.js";
 import referralRoutes from "./routes/referral.js";
-
+import productSuppliersRoutes from "./routes/productSuppliers.js";
 import categoryRoutes from "./routes/category.js";
 import authRoutes from "./routes/auth.js";
 import adminRoute from "./routes/admin.js";
-
+import downlineRoutes from "./routes/downline.js"
 const app = express();
 
 /** =========================
@@ -92,25 +92,54 @@ createBullBoard({
 });
 app.use("/bull", serverAdapter.getRouter());
 
+
+
+// 👉 letakkan sebelum app.use('/api', routes)
+app.set('json replacer', (key, value) => {
+  // BigInt dari Prisma (@db.BigInt)
+  if (typeof value === 'bigint') return value.toString();
+
+  // Prisma Decimal (mis. @db.Decimal) — kirim sebagai string biar presisi aman
+  if (value && value.constructor && value.constructor.name === 'Decimal') {
+    return value.toString(); // atau toNumber() kalau mau jadi Number
+  }
+
+  return value;
+});
+
+
+
 /** =========================
  *  Routes
  *  ======================== */
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoute);
-app.use("/api/admin", monitorRoutes);           // ← penting: aktifkan monitor (transactions & stats)
 app.use("/api/trx", trxRoutes);
 app.use("/api/transactions", transactionRoutes);
 app.use("/api/reseller", routeReseller);
-app.use("/api/commission/rules", authReseller, routerCommisson);
+app.use("/api/downline", downlineRoutes);
+app.use("/api/commission/rules", routerCommisson);
 app.use("/api/products", routerProduct);
 app.use("/api/suppliers", routerSuplier);
 app.use("/api/referral", referralRoutes);
-
+app.use("/api/product-suppliers", productSuppliersRoutes);
 app.use("/api/category", categoryRoutes);
 app.get('/health', (req,res)=>res.json({ ok:true }));
 /** =========================
  *  Admin utilities
  *  ======================== */
+
+// ⬇️ TAMBAHKAN ENDPOINT BROADCAST
+// ⬇️ TAMBAHKAN ENDPOINT BROADCAST
+app.post("/api/admin/broadcast-trx", (req, res) => {
+  const payload = req.body || {};
+  const nsp = app.locals.trxNsp;
+  nsp.emit("trx:update", payload);
+  if (payload?.resellerId) nsp.to(`reseller:${payload.resellerId}`).emit("trx:update", payload);
+  if (payload?.id) nsp.to(`trx:${payload.id}`).emit("trx:update", payload);
+  res.json({ ok: true });
+});
+
 app.post("/api/admin/reseller/:id/parent", async (req, res) => {
   const { id } = req.params;
   const { parentId } = req.body;

@@ -4,7 +4,7 @@ import express from 'express';
 // Auth & middleware
 import { loginAdmin } from '../controllers/auth.js';
 import { authAdmin } from '../middleware/authAdmin.js';
-
+import { refundTransaction } from "../controllers/refund.js";
 // Admin ops lain
 import { topupSaldoManual } from '../controllers/saldo.js';
 import { createResellerByAdmin } from '../controllers/admin/createResellerByAdmin.js';
@@ -109,5 +109,5 @@ router.post('/suppliers/:code/config/test',  testSupplierConfig);
 // ===== Healthcheck (cron/internal) =====
 // kalau mau dibuka hanya internal, bisa pasang IP allowlist atau secret
 router.post('/internal/healthcheck/suppliers',  healthCheckSuppliers);
-
+router.post("/transactions/:id/refund", /* ← tambahkan middleware admin auth kalau ada, */ refundTransaction)
 export default router;

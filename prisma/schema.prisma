@@ -32,12 +32,15 @@ enum TransactionStatus {
   REFUNDED
   CANCELED
   EXPIRED
+  WAITING
 }
+
 enum TransactionType {
   TOPUP
   TAGIHAN_INQUIRY
   TAGIHAN_PAY
 }
+
 enum ChannelType {
   API
   IP
@@ -98,20 +101,27 @@ model Reseller {
   parent   Reseller?  @relation("ResellerTree", fields: [parentId], references: [id])
   children Reseller[] @relation("ResellerTree")
 
-  user         User               @relation(fields: [userId], references: [id])
-  saldo        Saldo?
-  callbacks    ResellerCallback[]
-  channels     ResellerChannel[]
-  transactions Transaction[]
-  mutasi       MutasiSaldo[]
-  resellerPrices  ResellerPrice[]
+  user                      User                       @relation(fields: [userId], references: [id])
+  saldo                     Saldo?
+  callbacks                 ResellerCallback[]
+  channels                  ResellerChannel[]
+  transactions              Transaction[]
+  mutasi                    MutasiSaldo[]
+  resellerPrices            ResellerPrice[]
   // Pricing/Komisi
   // DEPRECATED: ResellerPrice[] (tidak dipakai lagi)
-  resellerMarkups         ResellerMarkup[]
+  resellerMarkups           ResellerMarkup[]
   commissionPlanAssignments CommissionPlanAssignment[]
-  commissionFlats         CommissionFlat[]
-  TransactionCommission   TransactionCommission[]
-  devices Device[] 
+  commissionFlats           CommissionFlat[]
+  TransactionCommission     TransactionCommission[]
+  // --- Wallet komisi (back-relations) ---
+  commissionBalance         CommissionBalance?         @relation("ResellerCommissionBalance")
+  commissionMutations       CommissionMutation[]       @relation("ResellerCommissionMutations")
+  commissionPayouts         CommissionPayout[]         @relation("ResellerCommissionPayouts")
+
+  devices              Device[]
+  ResellerGlobalMarkup ResellerGlobalMarkup[]
+
   @@index([parentId])
 }
 
@@ -123,6 +133,8 @@ model Device {
   identifier String    @unique
   isActive   Boolean   @default(true)
   createdAt  DateTime  @default(now())
+  lastSeenAt DateTime?
+  lastIp     String?
 }
 
 model ResellerChannel {
@@ -139,14 +151,14 @@ model ResellerChannel {
 }
 
 model Saldo {
-  resellerId String  @id
-  amount     BigInt  @default(0)
+  resellerId String @id
+  amount     BigInt @default(0)
 
-  reseller   Reseller @relation(fields: [resellerId], references: [id])
+  reseller Reseller @relation(fields: [resellerId], references: [id])
 }
 
 model MutasiSaldo {
-  id           String        @id @default(uuid())
+  id           String       @id @default(uuid())
   trxId        String
   resellerId   String
   type         MutasiType
@@ -156,10 +168,10 @@ model MutasiSaldo {
   afterAmount  BigInt
   note         String?
   reference    String?
-  status       MutasiStatus  @default(SUCCESS)
-  createdAt    DateTime      @default(now())
+  status       MutasiStatus @default(SUCCESS)
+  createdAt    DateTime     @default(now())
 
-  reseller     Reseller      @relation(fields: [resellerId], references: [id])
+  reseller Reseller @relation(fields: [resellerId], references: [id])
 
   @@index([resellerId, createdAt])
 }
@@ -170,8 +182,25 @@ model ProductCategory {
   code        String?   @unique
   products    Product[]
   description String?
+  prefixes    ProductCategoryPrefix[]  
   createdAt   DateTime  @default(now())
 }
+
+model ProductCategoryPrefix {
+  id          String          @id @default(uuid())
+  categoryId  String
+  category    ProductCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  prefix      String          // contoh: "0817"
+  length      Int             @default(4)
+
+  createdAt   DateTime        @default(now())
+
+  @@index([prefix])
+  @@unique([categoryId, prefix]) // prefix unik per kategori
+}
+
+
 
 model Product {
   id        String      @id @default(uuid())
@@ -183,31 +212,28 @@ model Product {
   margin    BigInt      @default(0)
   isActive  Boolean     @default(true)
   createdAt DateTime    @default(now())
- 
+
   supplierProducts SupplierProduct[]
   resellerPrices   ResellerPrice[]
   commissionRules  CommissionRule[]
   Transaction      Transaction[]
   CommissionFlat   CommissionFlat[]
-  categoryId  String?
-  category    ProductCategory? @relation(fields: [categoryId], references: [id])
-  resellerMarkups ResellerMarkup[]
+  categoryId       String?
+  category         ProductCategory?  @relation(fields: [categoryId], references: [id])
+  resellerMarkups  ResellerMarkup[]
 }
 
-
-
 model SupplierConfig {
-  id          String   @id @default(uuid())
-  supplierId  String   @unique
-  version     Int      @default(1)
-  defaults    Json?    // { timeoutMs, headers, ... }
-  ops         Json     // { topup: {...}, inquiry: {...}, paybill: {...}, callback?: {...} }
-  updatedAt   DateTime @updatedAt
-  createdAt   DateTime @default(now())
+  id         String   @id @default(uuid())
+  supplierId String   @unique
+  version    Int      @default(1)
+  defaults   Json? // { timeoutMs, headers, ... }
+  ops        Json // { topup: {...}, inquiry: {...}, paybill: {...}, callback?: {...} }
+  updatedAt  DateTime @updatedAt
+  createdAt  DateTime @default(now())
 
   supplier Supplier @relation(fields: [supplierId], references: [id])
 }
-
 
 model Supplier {
   id        String         @id @default(uuid())
@@ -232,14 +258,14 @@ model SupplierEndpoint {
   isActive   Boolean  @default(true)
   createdAt  DateTime @default(now())
 
-  lastHealthAt   DateTime?
-  lastStatus     String?
-  lastLatencyMs  Int?
-  failCount      Int       @default(0)
-  successCount   Int       @default(0)
- 
+  lastHealthAt  DateTime?
+  lastStatus    String?
+  lastLatencyMs Int?
+  failCount     Int       @default(0)
+  successCount  Int       @default(0)
+
   healthLogs SupplierHealthLog[]
-  supplier Supplier @relation(fields: [supplierId], references: [id])
+  supplier   Supplier            @relation(fields: [supplierId], references: [id])
 }
 
 model SupplierProduct {
@@ -276,7 +302,7 @@ model Transaction {
   resellerId      String
   productId       String
   msisdn          String
-  type            TransactionType @default(TOPUP)
+  type            TransactionType   @default(TOPUP)
   sellPrice       BigInt
   adminFee        BigInt            @default(0)
   status          TransactionStatus @default(PENDING)
@@ -294,7 +320,9 @@ model Transaction {
   reseller Reseller @relation(fields: [resellerId], references: [id])
   product  Product  @relation(fields: [productId], references: [id])
 
-  commissions TransactionCommission[]
+  commissions         TransactionCommission[]
+  // --- Wallet komisi (back-relation) ---
+  commissionMutations CommissionMutation[]    @relation("TransactionCommissionMutations")
 
   @@unique([resellerId, externalRefId])
   @@index([resellerId, productId, msisdn, createdAt])
@@ -302,15 +330,22 @@ model Transaction {
 
 // ========== Pricing by MARKUP (baru, dipakai) ==========
 model ResellerMarkup {
-  id         String  @id @default(uuid())
+  id         String @id @default(uuid())
   resellerId String
   productId  String
-  markup     BigInt  @default(0)
+  markup     BigInt @default(0)
 
   reseller Reseller @relation(fields: [resellerId], references: [id])
   product  Product  @relation(fields: [productId], references: [id])
 
   @@unique([resellerId, productId])
+}
+
+model ResellerGlobalMarkup {
+  resellerId String @id
+  markup     BigInt @default(0)
+
+  reseller Reseller @relation(fields: [resellerId], references: [id])
 }
 
 // ========== (Opsional) Sistem Komisi Tambahan ==========
@@ -362,6 +397,7 @@ model TransactionCommission {
   transaction Transaction @relation(fields: [transactionId], references: [id])
   reseller    Reseller    @relation(fields: [resellerId], references: [id])
 
+  @@unique([transactionId, resellerId, level])
   @@index([transactionId])
 }
 
@@ -394,19 +430,56 @@ model CommissionFlat {
   @@index([resellerId, level])
 }
 
-
-
-
 // --- Opsional log kesehatan untuk audit ringkas ---
 model SupplierHealthLog {
-  id          String   @id @default(uuid())
-  endpointId  String
-  checkedAt   DateTime @default(now())
-  status      String   // "UP" | "DOWN" | "DEGRADED"
-  latencyMs   Int?
-  message     String?
+  id         String   @id @default(uuid())
+  endpointId String
+  checkedAt  DateTime @default(now())
+  status     String // "UP" | "DOWN" | "DEGRADED"
+  latencyMs  Int?
+  message    String?
 
   endpoint SupplierEndpoint @relation(fields: [endpointId], references: [id])
 
   @@index([endpointId, checkedAt])
+}
+
+// Saldo komisi per reseller (agregat)
+model CommissionBalance {
+  resellerId String   @id
+  amount     BigInt   @default(0)
+  reseller   Reseller @relation("ResellerCommissionBalance", fields: [resellerId], references: [id])
+}
+
+model CommissionMutation {
+  id            String   @id @default(uuid())
+  resellerId    String
+  transactionId String? // jika earn/reversal dari transaksi tertentu
+  type          String // "EARN" | "REVERSAL" | "PAYOUT"
+  amount        BigInt // EARN=+, REVERSAL/PAYOUT=-
+  beforeAmount  BigInt
+  afterAmount   BigInt
+  note          String?
+  createdAt     DateTime @default(now())
+
+  reseller    Reseller     @relation("ResellerCommissionMutations", fields: [resellerId], references: [id])
+  transaction Transaction? @relation("TransactionCommissionMutations", fields: [transactionId], references: [id])
+
+  @@index([resellerId, createdAt])
+}
+
+model CommissionPayout {
+  id          String    @id @default(uuid())
+  resellerId  String
+  amount      BigInt
+  fee         BigInt    @default(0)
+  status      String    @default("PENDING") // "PENDING" | "APPROVED" | "REJECTED" | "PAID" | "CANCELED"
+  note        String?
+  createdAt   DateTime  @default(now())
+  processedAt DateTime?
+  approverId  String? // User.id admin yang memproses
+
+  reseller Reseller @relation("ResellerCommissionPayouts", fields: [resellerId], references: [id])
+
+  @@index([resellerId, status, createdAt])
 }

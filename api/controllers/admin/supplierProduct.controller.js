@@ -6,6 +6,8 @@ export async function upsertSupplierProduct(req, res) {
   try {
     const { supplierId } = req.params;
     const { productId, supplierSku, costPrice, isAvailable = true, priority = 100 } = req.body;
+
+    console.log(req.body)
     if (!productId || !supplierSku || costPrice == null) {
       return res.status(400).json({ error: 'productId, supplierSku, costPrice wajib' });
     }
@@ -15,7 +17,9 @@ export async function upsertSupplierProduct(req, res) {
       update: { supplierSku, costPrice: BigInt(costPrice), isAvailable, priority },
     });
     res.json({ ok: true, data });
-  } catch (e) { res.status(400).json({ error: e.message }); }
+  } catch (e) { 
+    console.log(e)
+    res.status(400).json({ error: e.message }); }
 }
 
 // PATCH /admin/supplier-products/:id

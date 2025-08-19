@@ -1,5 +1,11 @@
 // api/controllers/product.js
 import prisma from "../prisma.js";
+const MAX_PAGE_LIMIT = 200;
+const DEFAULT_MAX_RESELLERS = Number(process.env.EP_MAX_RESELLERS || 50);
+
+function toStr(n) {
+  try { return n != null ? n.toString() : "0"; } catch { return "0"; }
+}
 
 
 export async function upsertCategory(req, res) {
@@ -23,7 +29,259 @@ export async function upsertCategory(req, res) {
   }
 }
 
+/** Ambil anak / seluruh keturunan dari ownerResellerId. */
+async function listDescendants(ownerResellerId, mode = "children") {
+  const result = [];
+  const q = [ownerResellerId];
+  let depth = 0;
 
+  while (q.length && depth < 50) {
+    const parents = q.splice(0, q.length);
+    const children = await prisma.reseller.findMany({
+      where: { parentId: { in: parents }, isActive: true },
+      select: { id: true }
+    });
+    if (!children.length) break;
+
+    const ids = children.map(c => c.id);
+    result.push(...ids);
+
+    if (mode === "all") q.push(...ids);
+    depth++;
+    if (mode === "children") break;
+  }
+  return result;
+}
+
+/** Bangun chain buyer -> upline (aktif) */
+async function buildActiveChain(resellerId, { maxLevels = 10 } = {}) {
+  const nodes = [];
+  let cur = resellerId;
+  const seen = new Set();
+
+  for (let i = 0; i <= maxLevels && cur; i++) {
+    if (seen.has(cur)) break;
+    seen.add(cur);
+
+    const r = await prisma.reseller.findUnique({
+      where: { id: cur },
+      select: { id: true, parentId: true, isActive: true }
+    });
+    if (!r || !r.isActive) break;
+
+    nodes.push({ id: r.id, parentId: r.parentId });
+    cur = r.parentId;
+  }
+  return nodes; // [buyer, upline1, ...]
+}
+
+/** Hitung harga efektif untuk sekumpulan productIds milik satu reseller. */
+async function bulkComputeEffectiveForProducts({ resellerId, productIds, maxLevels = 10 }) {
+  const chain = await buildActiveChain(resellerId, { maxLevels });
+  if (!chain.length || !productIds.length) return { chain, results: new Map() };
+
+  // base
+  const products = await prisma.product.findMany({
+    where: { id: { in: productIds }, isActive: true },
+    select: { id: true, basePrice: true, margin: true, code: true, name: true, type: true, categoryId: true }
+  });
+  const baseMap = new Map(
+    products.map(p => [p.id, BigInt(p.basePrice) + BigInt(p.margin ?? 0n)])
+  );
+
+  // markups
+  const resellerIds = chain.map(n => n.id);
+  const [perProduct, globals] = await Promise.all([
+    prisma.resellerMarkup.findMany({
+      where: { resellerId: { in: resellerIds }, productId: { in: productIds } },
+      select: { resellerId: true, productId: true, markup: true }
+    }),
+    prisma.resellerGlobalMarkup.findMany({
+      where: { resellerId: { in: resellerIds } },
+      select: { resellerId: true, markup: true }
+    })
+  ]);
+  const globalMap = new Map(globals.map(g => [g.resellerId, BigInt(g.markup ?? 0n)]));
+  const ppMap = new Map(perProduct.map(m => [`${m.resellerId}|${m.productId}`, BigInt(m.markup ?? 0n)]));
+
+  const results = new Map();
+  for (const p of products) {
+    const base = baseMap.get(p.id) ?? 0n;
+    let effective = base;
+    let buyerMarkup = 0n;
+    let uplineTotalMarkup = 0n;
+
+    const breakdown = chain.map((n, idx) => {
+      const key = `${n.id}|${p.id}`;
+      const add = ppMap.has(key) ? ppMap.get(key) : (globalMap.get(n.id) ?? 0n);
+      effective += add;
+      const role = idx === 0 ? "BUYER" : "UPLINE";
+      if (role === "BUYER") buyerMarkup += add; else uplineTotalMarkup += add;
+      return { resellerId: n.id, role, level: idx, markup: add };
+    });
+
+    results.set(p.id, {
+      product: { id: p.id, code: p.code, name: p.name, type: p.type, categoryId: p.categoryId },
+      base,
+      buyerMarkup,
+      uplineTotalMarkup,
+      effectiveSell: effective,
+      breakdown
+    });
+  }
+
+  return { chain, results };
+}
+
+/**
+ * GET /api/effective-price/downlines
+ * Query:
+ *  - ownerResellerId (wajib)
+ *  - scope=children|all (default children)
+ *  - resellerIds=<csv subset> (opsional)
+ *  - type=PULSA|TAGIHAN, categoryId, q
+ *  - page=1.., limit=1..200
+ *  - includeBreakdown=true|false (dipakai hanya utk owner/self)
+ *  - maxResellers (default 50)
+ *
+ * Catatan: TANPA auth middleware — tambahkan sendiri nanti.
+ */
+export async function listEffectivePriceForDownlines(req, res) {
+  try {
+    const ownerResellerId = String(req.query.ownerResellerId || "");
+    if (!ownerResellerId) {
+      return res.status(400).json({ error: "ownerResellerId wajib" });
+    }
+
+    const scope = (req.query.scope || "children").toString();
+    const includeBreakdown = String(req.query.includeBreakdown || "false").toLowerCase() === "true";
+    const maxResellers = Math.min(
+      Math.max(parseInt(req.query.maxResellers || String(DEFAULT_MAX_RESELLERS), 10), 1),
+      500
+    );
+
+    // ambil downlines
+    let targets = await listDescendants(ownerResellerId, scope === "all" ? "all" : "children");
+
+    // subset manual (opsional)
+    if (req.query.resellerIds) {
+      const subset = String(req.query.resellerIds).split(",").map(s => s.trim()).filter(Boolean);
+      const set = new Set(subset);
+      targets = targets.filter(rid => set.has(rid));
+    }
+
+    // batasi payload
+    if (targets.length > maxResellers) targets = targets.slice(0, maxResellers);
+
+    // jika tidak ada downline, tetap tampilkan “self” agar bisa lihat detail katalog sendiri
+    const finalTargets = targets.length ? targets : [ownerResellerId];
+
+    // filter produk
+    const type = req.query?.type ? String(req.query.type).toUpperCase() : null;
+    const categoryId = req.query?.categoryId || null;
+    const q = req.query?.q ? String(req.query.q).trim() : null;
+
+    const page = Math.max(parseInt(req.query?.page || "1", 10), 1);
+    const limit = Math.min(Math.max(parseInt(req.query?.limit || "50", 10), 1), MAX_PAGE_LIMIT);
+    const skip = (page - 1) * limit;
+
+    const where = { isActive: true };
+    if (type) where.type = type;
+    if (categoryId) where.categoryId = categoryId;
+    if (q) where.OR = [
+      { name: { contains: q, mode: "insensitive" } },
+      { code: { contains: q, mode: "insensitive" } }
+    ];
+
+    const [items, total] = await Promise.all([
+      prisma.product.findMany({
+        where,
+        orderBy: [{ type: "asc" }, { code: "asc" }],
+        select: { id: true, code: true, name: true, type: true, categoryId: true, basePrice: true, margin: true },
+        skip, take: limit
+      }),
+      prisma.product.count({ where })
+    ]);
+    if (!items.length) {
+      return res.json({
+        ok: true,
+        ownerResellerId,
+        scope,
+        totalDownlines: targets.length,
+        products: { page, limit, total },
+        data: []
+      });
+    }
+
+    const productIds = items.map(p => p.id);
+    const data = [];
+
+    for (const rid of finalTargets) {
+      const { results } = await bulkComputeEffectiveForProducts({
+        resellerId: rid,
+        productIds,
+        maxLevels: 10
+      });
+
+      const isSelf = (rid === ownerResellerId);
+
+      const rows = items.map(p => {
+        const r = results.get(p.id);
+        if (!r) {
+          const base = BigInt(p.basePrice) + BigInt(p.margin ?? 0n);
+          return isSelf
+            ? {
+                product: { id: p.id, code: p.code, name: p.name, type: p.type, categoryId: p.categoryId },
+                base: toStr(base),
+                buyerMarkup: "0",
+                uplineTotalMarkup: "0",
+                effectiveSell: toStr(base),
+                breakdown: includeBreakdown ? [] : undefined
+              }
+            : {
+                product: { id: p.id, code: p.code, name: p.name, type: p.type, categoryId: p.categoryId },
+                effectiveSell: toStr(base)
+              };
+        }
+
+        return isSelf
+          ? {
+              product: r.product,
+              base: toStr(r.base),
+              buyerMarkup: toStr(r.buyerMarkup),
+              uplineTotalMarkup: toStr(r.uplineTotalMarkup),
+              effectiveSell: toStr(r.effectiveSell),
+              breakdown: includeBreakdown
+                ? r.breakdown.map(b => ({
+                    resellerId: b.resellerId,
+                    role: b.role,
+                    level: b.level,
+                    markup: toStr(b.markup)
+                  }))
+                : undefined
+            }
+          : {
+              product: r.product,
+              effectiveSell: toStr(r.effectiveSell)
+            };
+      });
+
+      data.push({ resellerId: rid, products: rows });
+    }
+
+    return res.json({
+      ok: true,
+      ownerResellerId,
+      scope,
+      totalDownlines: targets.length,
+      products: { page, limit, total },
+      data
+    });
+  } catch (e) {
+    console.error("listEffectivePriceForDownlines error:", e);
+    return res.status(500).json({ error: e.message || "Gagal mengambil daftar harga efektif downline" });
+  }
+}
 
 
 

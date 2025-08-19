@@ -6,9 +6,10 @@ import { generateResellerId } from "../../utils/idGenerator.js";
 
 // GET saldo reseller login
 export async function getSaldo(req, res) {
+  console.log(req.params.id)
   try {
     const saldo = await prisma.saldo.findUnique({
-      where: { resellerId: req.reseller.id },
+      where: { resellerId: req.params.id },
     });
     res.json({ amount: Number(saldo?.amount ?? 0n) });
   } catch (err) {
@@ -19,11 +20,13 @@ export async function getSaldo(req, res) {
 
 // GET mutasi saldo reseller login
 export async function getMutasi(req, res) {
+
+  const id = req.params.id
   try {
     const take = Number(req.query.take || 20);
     const skip = Number(req.query.skip || 0);
     const rows = await prisma.mutasiSaldo.findMany({
-      where: { resellerId: req.reseller.id },
+      where: { resellerId: id },
       orderBy: { createdAt: "desc" },
       skip,
       take,
