@@ -304,10 +304,12 @@ model Transaction {
   msisdn          String
   type            TransactionType   @default(TOPUP)
   sellPrice       BigInt
+  supplierPrice   BigInt
   adminFee        BigInt            @default(0)
   status          TransactionStatus @default(PENDING)
   supplierId      String?
   supplierRef     String?
+
   supplierPayload Json?
   supplierResult  Json?
   callbackSentAt  DateTime?

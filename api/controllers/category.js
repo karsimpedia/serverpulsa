@@ -23,7 +23,7 @@ export async function listCategoriesByPrefix(req, res) {
     const msisdn = normalizeMsisdn(raw);
 
     if (!msisdn) return res.status(400).json({ error: "msisdn wajib diisi." });
-    if (msisdn.length < 3)
+    if (msisdn.length < 4)
       return res.status(400).json({ error: "msisdn terlalu pendek." });
 
     const candidates = makePrefixCandidates(msisdn, { min: 3, max: 8 });
@@ -357,20 +357,43 @@ export async function listCategories(req, res) {
 }
 
 // GET /api/category/:id
+// GET /api/category/:id
 export async function getCategoryById(req, res) {
   try {
     const { id } = req.params;
-    const cat = await prisma.productCategory.findUnique({
-      where: { id },
-      include: { _count: { select: { products: true } } },
+
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
+
+    const cat = await prisma.productCategory.findFirst({
+      where: isUuid ? { id } : { code: id },
+      include: {
+        _count: {
+          select: { products: true, prefixes: true },
+        },
+        prefixes: {
+          select: { prefix: true }, // ambil kolom prefix saja
+          orderBy: { prefix: "asc" },
+        },
+      },
     });
-    if (!cat) return res.status(404).json({ error: "Kategori tidak ditemukan." });
-    res.json({ data: cat });
+
+    if (!cat) {
+      return res.status(404).json({ error: "Kategori tidak ditemukan." });
+    }
+
+    // ubah objek prefixes { prefix: "0817" } jadi array string
+    const result = {
+      ...cat,
+      prefixes: cat.prefixes.map((p) => p.prefix),
+    };
+
+    res.json({ data: result });
   } catch (e) {
     console.error("getCategoryById:", e);
     res.status(500).json({ error: "Gagal mengambil kategori." });
   }
 }
+
 
 // GET /api/category/:id/products?type=&active=&page=&limit=&q=
 export async function getCategoryProducts(req, res) {
@@ -443,7 +466,7 @@ export async function listCategoryPrefixes(req, res) {
     const { id } = req.params;
     const cat = await prisma.productCategory.findUnique({
       where: { id },
-      select: { id: true, name: true },
+      select: { id: true, name: true, code: true, description: true,  },
     });
     if (!cat) return res.status(404).json({ error: "Kategori tidak ditemukan." });
 
@@ -461,35 +484,90 @@ export async function listCategoryPrefixes(req, res) {
 
 // POST /api/category/:id/prefixes/bulk
 // body: { prefixes: string[] }  -> contoh: ["0817","0818","0819"]
+// POST /api/category/:id/prefixes/bulk
 export async function bulkAddCategoryPrefixes(req, res) {
   try {
     const { id } = req.params;
-    const cat = await prisma.productCategory.findUnique({ where: { id }, select: { id: true } });
+
+    // Pastikan kategori ada
+    const cat = await prisma.productCategory.findUnique({
+      where: { id },
+      select: { id: true },
+    });
     if (!cat) return res.status(404).json({ error: "Kategori tidak ditemukan." });
 
-    let { prefixes = [] } = req.body || {};
-    if (!Array.isArray(prefixes)) prefixes = [];
+    const body = req.body ?? {};
 
-    const cleaned = prefixes
-      .map((p) => String(p || "").replace(/\D/g, ""))
-      .filter((p) => p.length >= 3 && p.length <= 5);
+    // Kumpulkan sumber input: prefixes[], items[], prefix (string), atau body raw string
+    const collected = [];
+
+    if (Array.isArray(body.prefixes)) {
+      collected.push(...body.prefixes);
+    }
+    if (Array.isArray(body.items)) {
+      // items: [{ prefix, length? }]
+      for (const it of body.items) {
+        const pref = String(it?.prefix ?? "").replace(/\D/g, "");
+        if (!pref) continue;
+        const length = Number.isInteger(it?.length) ? Number(it.length) : pref.length;
+        collected.push({ prefix: pref, length });
+      }
+    }
+    if (typeof body.prefix === "string") {
+      collected.push(body.prefix);
+    }
+    if (typeof body === "string") {
+      collected.push(body);
+    }
+
+    // Normalisasi: jadikan array objek { prefix, length }
+    const items = [];
+    for (const entry of collected) {
+      if (entry && typeof entry === "object" && "prefix" in entry) {
+        const pref = String(entry.prefix ?? "").replace(/\D/g, "");
+        if (!pref) continue;
+        const length = Number.isInteger(entry.length) ? Number(entry.length) : pref.length;
+        items.push({ prefix: pref, length });
+      } else {
+        const pref = String(entry ?? "").replace(/\D/g, "");
+        if (!pref) continue;
+        items.push({ prefix: pref, length: pref.length });
+      }
+    }
+
+    // Filter: panjang 3–5 digit, unik
+    const seen = new Set();
+    const cleaned = items.filter(({ prefix, length }) => {
+      if (prefix.length < 3 || prefix.length > 5) return false;
+      if (seen.has(prefix)) return false;
+      seen.add(prefix);
+      return true;
+    });
 
     if (cleaned.length === 0) {
       return res.status(400).json({ error: "Tidak ada prefix valid (3–5 digit)." });
     }
 
-    const ops = cleaned.map((pref) =>
+    // Upsert berdasarkan unique (categoryId, prefix)
+    const ops = cleaned.map(({ prefix, length }) =>
       prisma.productCategoryPrefix.upsert({
-        where: { categoryId_prefix: { categoryId: id, prefix: pref } },
-        create: { categoryId: id, prefix: pref, length: pref.length },
+        where: { categoryId_prefix: { categoryId: id, prefix } },
+        create: { categoryId: id, prefix, length },
         update: {},
       })
     );
 
-    const result = await prisma.$transaction(ops);
-    res.json({ addedOrKept: result.length, data: result });
+    await prisma.$transaction(ops);
+
+    // Kembalikan daftar terbaru untuk memudahkan UI sinkron
+    const latest = await prisma.productCategoryPrefix.findMany({
+      where: { categoryId: id },
+      orderBy: { prefix: "asc" },
+      select: { id: true, categoryId: true, prefix: true, length: true, createdAt: true },
+    });
+
+    res.json({ addedOrKept: cleaned.length, data: latest });
   } catch (e) {
-    // P2002 duplikat unique (harusnya tertangani oleh upsert)
     console.error("bulkAddCategoryPrefixes:", e);
     res.status(500).json({ error: "Gagal menambahkan prefix." });
   }

@@ -101,8 +101,8 @@ router.post(
 );
 
 // ===== Supplier Config (JSON di DB) =====
-router.get('/suppliers/:code/config',  getSupplierConfig);
-router.put('/suppliers/:code/config', upsertSupplierConfig);
+router.get('/suppliers/:id/config',  getSupplierConfig);
+router.put('/suppliers/:id/config', upsertSupplierConfig);
 router.patch('/suppliers/:code/config/ops/:op',  patchSupplierOp);
 router.post('/suppliers/:code/config/test',  testSupplierConfig);
 

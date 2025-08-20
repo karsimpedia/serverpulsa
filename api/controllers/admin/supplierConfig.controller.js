@@ -14,12 +14,12 @@ function validateOps(ops) {
   }
 }
 
-// GET /admin/suppliers/:code/config
+// GET /admin/suppliers/:id/config
 export async function getSupplierConfig(req, res) {
   try {
-    const { code } = req.params;
+    const { id } = req.params;
     const sup = await prisma.supplier.findUnique({
-      where: { code },
+      where: { id },
       select: { id: true, code: true, config: true }
     });
     if (!sup) return res.status(404).json({ error: 'Supplier tidak ditemukan' });
@@ -31,13 +31,13 @@ export async function getSupplierConfig(req, res) {
 // body: { version?, defaults?, ops }
 export async function upsertSupplierConfig(req, res) {
   try {
-    const { code } = req.params;
+    const { id } = req.params;
     const { version = 1, defaults = {}, ops } = req.body || {};
     if (!ops) return res.status(400).json({ error: 'ops wajib' });
 
     validateOps(ops);
 
-    const sup = await prisma.supplier.findUnique({ where: { code } });
+    const sup = await prisma.supplier.findUnique({ where: { id } });
     if (!sup) return res.status(404).json({ error: 'Supplier tidak ditemukan' });
 
     const data = await prisma.supplierConfig.upsert({
