@@ -5,6 +5,8 @@ import { callSupplier } from '../../api/lib/supplier-client.js';
 import { computeEffectiveSellPrice } from '../../api/lib/effective-price.js';
 import { pushTrxUpdate } from '../utils/socket.js'; // opsional, aman jika tidak di-setup
 
+const onlyDigits = (v) => (v == null ? undefined : String(v).replace(/[^\d]/g, '') || undefined);
+
 export async function processInquiryBill(trxId) {
   const trx = await prisma.transaction.findUnique({
     where: { id: trxId },
@@ -12,9 +14,10 @@ export async function processInquiryBill(trxId) {
   });
   if (!trx) throw new Error('Transaksi tidak ditemukan');
   if (trx.product?.type !== 'TAGIHAN') throw new Error('Transaksi bukan TAGIHAN');
-  // Boleh dipanggil saat status: PENDING/PROCESSING/QUOTED (untuk refresh inquiry)
-  if (trx.status === 'SUCCESS' || trx.status === 'FAILED' || trx.status === 'CANCELED' || trx.status === 'EXPIRED') {
-    return { skip: 'already-final' };
+
+  // Boleh dipanggil saat status: WAITING / PENDING / PROCESSING (refresh inquiry)
+  if (!['WAITING', 'PENDING', 'PROCESSING'].includes(trx.status)) {
+    return { skip: `not-eligible(${trx.status})` };
   }
 
   const candidates = await pickCandidatesForWorker(trx.productId);
@@ -28,57 +31,75 @@ export async function processInquiryBill(trxId) {
 
   for (const c of candidates) {
     try {
+      // Ambil snapshot request (idNumber/dest/amount) dari payload inquiry sebelumnya
+      const reqSnap = trx.supplierPayload?.request || {};
+      const idNumber = reqSnap.idNumber ?? trx.msisdn; // fallback aman
+      const dest     = reqSnap.dest ?? trx.msisdn;     // tujuan tersimpan di msisdn
+      const amount   = onlyDigits(reqSnap.amount);     // open denom (opsional)
+
+      // Siapkan konteks pemanggilan vendor
       const ctx = {
         baseUrl: c.ep.baseUrl,
-        apiKey: c.ep.apiKey,
+        apiKey: c.ep.apiKey || undefined,
+        secret: c.ep.secret || undefined,
         ref: trx.invoiceId,
-        sku: trx.supplierPayload?.supplierSku || null,
-        customerNo: trx.msisdn
+        product: c.sp?.supplierSku || trx.supplierPayload?.supplierSku || null,
+        customerNo: String(idNumber || ''), // Nomor ID pelanggan
+        msisdn: String(dest || ''),        // Nomor tujuan (bila dipakai vendor)
+        ...(amount ? { amount } : {}),
       };
 
       const res = await callSupplier('inquiry', c.supplierCode, ctx);
       if (!res.ok) { lastErr = res.error || 'transport'; continue; }
 
-      const st = res.norm.status; // SUCCESS/FAILED/PENDING
-      // simpan hasil mentah & ref
+      const norm = res.norm || {};
+      const st = String(norm.status || '').toUpperCase();
+
+      // Tulang punggung data yang selalu disimpan
       const writeBase = {
         supplierId: c.sp.supplierId,
-        supplierRef: res.norm.supplierRef ?? trx.supplierRef,
+        supplierRef: norm.supplierRef ?? trx.supplierRef ?? null,
         supplierPayload: {
           ...(trx.supplierPayload || {}),
           step: 'INQUIRY',
           endpointId: c.ep.id,
           baseUrl: c.ep.baseUrl,
           supplierSku: c.sp.supplierSku,
-          supplierFee: res.norm.adminFee ?? (trx.supplierPayload?.supplierFee ?? 0n),
+          supplierFee: norm.adminFee ?? (trx.supplierPayload?.supplierFee ?? 0n),
+          request: {
+            ...(reqSnap || {}),
+            idNumber: String(idNumber || ''),
+            dest: String(dest || ''),
+            ...(amount ? { amount } : {}),
+          }
         },
         supplierResult: res.data
       };
 
-      if (st === 'FAILED') {
+      if (st === 'FAILED' || st === 'CANCELED' || st === 'EXPIRED') {
         await prisma.transaction.update({
           where: { id: trxId },
-          data: { ...writeBase, status: 'FAILED', message: res.norm.message || 'FAILED' }
+          data: { ...writeBase, status: st, message: norm.message || st }
         });
-        pushTrxUpdate(trxId, { status: 'FAILED', message: res.norm.message || 'FAILED' });
+        pushTrxUpdate(trxId, { status: st, message: norm.message || st });
         return;
       }
 
-      if (st === 'PENDING') {
+      if (st === 'PENDING' || st === 'PROCESSING') {
         await prisma.transaction.update({
           where: { id: trxId },
-          data: { ...writeBase, status: 'PROCESSING', message: res.norm.message || 'PROCESSING' }
+          data: { ...writeBase, status: 'PROCESSING', message: norm.message || 'PROCESSING' }
         });
-        pushTrxUpdate(trxId, { status: 'PROCESSING', message: res.norm.message || 'PROCESSING' });
+        pushTrxUpdate(trxId, { status: 'PROCESSING', message: norm.message || 'PROCESSING' });
         return;
       }
 
-      // SUCCESS: normalisasi harga
-      const amountDue = res.norm.amount ?? 0n;
+      // SUCCESS → normalisasi harga dan jadikan WAITING (siap dibayar)
+      const amountDue   = norm.amount ?? 0n; // BigInt
       const baseAdminFee = BigInt(trx.product?.margin || 0n);
 
       // Hitung markup berantai (effective - baseDefault)
-      const baseDefault = BigInt(trx.product.basePrice || 0n) + BigInt(trx.product.margin || 0n);
+      const baseDefault = BigInt(trx.product?.basePrice || 0n) + BigInt(trx.product?.margin || 0n);
       const { effectiveSell } = await computeEffectiveSellPrice(trx.resellerId, trx.productId);
       let markupSum = BigInt(effectiveSell) - baseDefault;
       if (markupSum < 0n) markupSum = 0n;
@@ -95,14 +116,14 @@ export async function processInquiryBill(trxId) {
           adminFee: baseAdminFee,
           markupSum,
           sellPrice,
-          status: 'QUOTED',
-          message: res.norm.message || 'OK',
+          status: 'WAITING', // ← belum diproses/dibayar
+          message: norm.message || 'OK',
           expiresAt
         }
       });
 
       pushTrxUpdate(trxId, {
-        status: 'QUOTED',
+        status: 'WAITING',
         amountDue: Number(amountDue),
         adminFee: Number(baseAdminFee),
         markupSum: Number(markupSum),
@@ -110,6 +131,7 @@ export async function processInquiryBill(trxId) {
         expiresAt
       });
       return;
+
     } catch (e) {
       lastErr = e?.message || String(e);
       // lanjut ke kandidat berikutnya

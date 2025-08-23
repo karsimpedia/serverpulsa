@@ -1,69 +1,73 @@
 // api/controllers/billing.js
-import axios from "axios";
 import prisma from "../prisma.js";
-import { trxQueue } from "../../queues.js";
 import bcrypt from "bcrypt";
-import { computeEffectiveSellPrice } from "../lib/effective-price.js"; // base + sum(markup)
+import { trxQueue } from "../../queues.js";
+import { computeEffectiveSellPrice } from "../lib/effective-price.js";
+import { callSupplier } from "../lib/supplier-client.js";
+import { pickSupplierWithEndpoint } from "../../utils/supplierPicker.js";
+import { emitTrxNew, emitTrxUpdate} from "../lib/realtime.js";
 
 const toNum = (v) => (v == null ? null : Number(v));
-
-// ==== Supplier picker ====
-async function pickSupplierWithEndpoint(productId) {
-  const list = await prisma.supplierProduct.findMany({
-    where: {
-      productId,
-      isAvailable: true,
-      supplier: { status: "ACTIVE" },
-    },
-    include: { supplier: { include: { endpoints: true } } },
-    orderBy: [{ priority: "asc" }, { costPrice: "asc" }],
-  });
-  for (const sp of list) {
-    const ep = sp.supplier.endpoints.find((e) => e.isActive);
-    if (ep) return { sp, ep };
-  }
-  return null;
-}
+// Sanitize nominal (hilangkan titik/koma/spasi)
+const sanitizeAmount = (a) => {
+  if (a == null) return undefined;
+  const s = String(a).replace(/[^\d]/g, "");
+  return s.length ? s : undefined;
+};
 
 // ==== Call supplier: INQUIRY ====
-async function supplierInquiry(ep, sp, { invoiceId, customerNo }) {
-  const url = `${ep.baseUrl.replace(/\/+$/, "")}/inquiry`;
-  const headers = {};
-  if (ep.apiKey) headers["x-api-key"] = ep.apiKey;
-
-  const body = {
-    ref: invoiceId,
-    sku: sp.supplierSku,
-    customerNo,
-  };
-
+async function supplierInquiry(ep, sp, { invoiceId, customerNo, msisdn, amount }) {
   try {
-    const { data } = await axios.post(url, body, { headers, timeout: 15000 });
-    // Normalisasi hasil inquiry (silakan sesuaikan dg supplier nyata)
-    // Ekspektasi: { status:'OK', amount, customerName, period, supplierRef, supplierFee }
+    const supplierCode = sp.supplier.code;
+    const amountSan = sanitizeAmount(amount);
+
+    const res = await callSupplier("inquiry", supplierCode, {
+      baseUrl: ep.baseUrl,
+      apiKey: ep.apiKey || undefined,
+      secret: ep.secret || undefined,
+      ref: invoiceId,
+      product: sp.supplierSku,
+      customerNo, // Nomor ID
+      msisdn,     // Nomor Tujuan
+      ...(amountSan ? { amount: amountSan } : {}),
+    });
+
+    if (!res?.ok) {
+      return { ok: false, error: res?.error || "transport error", raw: res?.data };
+    }
+
+    const norm = res.norm || {};
     return {
       ok: true,
-      raw: data,
-      amount: BigInt(data.amount ?? 0),
-      supplierFee: BigInt(data.supplierFee ?? 0), // biaya supplier jika ada (biaya ke vendor)
-      customerName: data.customerName ?? null,
-      period: data.period ?? null,
-      supplierRef: data.supplierRef ?? data.ref ?? null,
+      raw: res.data,
+      amount: norm.amount ?? null,             // BigInt|null
+      supplierFee: norm.adminFee ?? null,      // BigInt|null
+      customerName: norm.extra?.customerName ?? null,
+      period: norm.extra?.period ?? null,
+      supplierRef: norm.supplierRef ?? null,
+      message: norm.message ?? null,
+      status: norm.status ?? "PENDING",
     };
   } catch (err) {
     return { ok: false, error: String(err) };
   }
 }
 
-// ==== Controller: INQUIRY tagihan ====
-// body: { productCode, customerNo }
+// ==== INQUIRY tagihan ====
+// body: { productCode, idNumber, dest, amount? }
 export async function inquiryBill(req, res) {
   try {
-    const { productCode, customerNo } = req.body;
+    const { productCode, idNumber, dest, amount } = req.body;
     const resellerId = req.reseller.id;
 
-    if (!productCode || !customerNo) {
-      return res.status(400).json({ error: "productCode & customerNo wajib." });
+    if (!productCode) return res.status(400).json({ error: "productCode wajib." });
+    if (!idNumber || !dest) {
+      return res.status(400).json({ error: "idNumber (Nomor ID) dan dest (Nomor Tujuan) wajib." });
+    }
+
+    const amountSan = sanitizeAmount(amount);
+    if (amount != null && !amountSan) {
+      return res.status(400).json({ error: "amount tidak valid (harus angka tanpa pemisah)." });
     }
 
     const product = await prisma.product.findUnique({ where: { code: productCode } });
@@ -77,41 +81,41 @@ export async function inquiryBill(req, res) {
 
     const invoiceId = `TRX-${Date.now()}`;
 
-    // hit inquiry ke supplier
-    const iq = await supplierInquiry(ep, sp, { invoiceId, customerNo });
+    // inquiry ke supplier (untuk dapatkan nominal/tagihan/alias/period/supplierRef)
+    const iq = await supplierInquiry(ep, sp, {
+      invoiceId,
+      customerNo: String(idNumber),
+      msisdn: String(dest),
+      amount: amountSan,
+    });
+
     if (!iq.ok || !iq.supplierRef) {
       return res.status(502).json({ error: "Gagal inquiry ke supplier.", detail: iq.error || iq.raw });
     }
 
-    // --- Hitung harga customer berdasarkan markup chain ---
-    // baseAdminFee = product.margin (kebijakan admin)
+    // harga customer
     const baseAdminFee = BigInt(product.margin ?? 0n);
-
-    // total markup berantai = effectiveSell(reseller) - (basePrice+margin)
     const baseDefault = BigInt(product.basePrice || 0n) + BigInt(product.margin || 0n);
     const { effectiveSell } = await computeEffectiveSellPrice(resellerId, product.id);
     let markupSum = BigInt(effectiveSell) - baseDefault;
     if (markupSum < 0n) markupSum = 0n;
 
-    // Harga final yang dibayar customer:
-    // sellPrice = amountDue + baseAdminFee + markupSum
-    const sellPrice = BigInt(iq.amount) + baseAdminFee + markupSum;
-
+    const amountDue = BigInt(iq.amount ?? 0n);
+    const sellPrice = amountDue + baseAdminFee + markupSum;
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
-    // simpan TRANSACTION: TAGIHAN_INQUIRY (tidak hold saldo)
     const trx = await prisma.transaction.create({
       data: {
         invoiceId,
         resellerId,
         productId: product.id,
-        msisdn: customerNo,     // simpan ID pelanggan di field msisdn
+        msisdn: String(dest),
         type: "TAGIHAN_INQUIRY",
-        sellPrice,              // harga final yg akan ditagih saat PAY
-        adminFee: baseAdminFee, // admin fee dasar kita (bukan biaya supplier)
-        markupSum,              // total markup berantai
-        amountDue: iq.amount,   // dari supplier
-        status: "QUOTED",
+        sellPrice,
+        adminFee: baseAdminFee,
+        ...(typeof markupSum === "bigint" ? { markupSum } : {}),
+        ...(typeof amountDue === "bigint" ? { amountDue } : {}),
+        status: "WAITING", // ← belum diproses/dikirim ke supplier untuk pembayaran
         supplierId: sp.supplierId,
         supplierRef: iq.supplierRef,
         supplierPayload: {
@@ -119,26 +123,49 @@ export async function inquiryBill(req, res) {
           endpointId: ep.id,
           baseUrl: ep.baseUrl,
           supplierSku: sp.supplierSku,
-          supplierFee: iq.supplierFee,  // biaya vendor (bila ada) → untuk analitik/kontenjan
-          request: { productCode, customerNo },
+          supplierFee: iq.supplierFee ?? null,
+          request: {
+            productCode,
+            idNumber: String(idNumber),
+            dest: String(dest),
+            ...(amountSan ? { amount: amountSan } : {}),
+          },
         },
         supplierResult: iq.raw,
         expiresAt,
-        message: iq.raw?.message || "OK",
+        message: iq.message || "OK",
       },
+    });
+
+    // Realtime
+    emitTrxNew(req.app.locals.trxNsp, {
+      id: trx.id,
+      invoiceId: trx.invoiceId,
+      resellerId: trx.resellerId,
+      productCode: product.code,
+      msisdn: trx.msisdn,
+      amount: Number(trx.sellPrice),
+      status: trx.status, // WAITING
+      supplierName: (sp?.supplier?.name) || null,
+      message: trx.message,
+      createdAt: trx.createdAt,
     });
 
     return res.json({
       ok: true,
       invoiceId,
-      customerNo,
+      idNumber: String(idNumber),
+      dest: String(dest),
+      ...(amountSan ? { amount: Number(amountSan) } : {}),
       customerName: iq.customerName,
       period: iq.period,
-      amountDue: toNum(iq.amount),
+      amountDue: toNum(amountDue),
       adminFee: toNum(baseAdminFee),
       markupSum: toNum(markupSum),
       sellPrice: toNum(sellPrice),
+      supplierRef: iq.supplierRef,
       expiresAt,
+      status: "WAITING",
       note: "Gunakan invoiceId ini untuk PAY dalam 5 menit.",
     });
   } catch (err) {
@@ -147,7 +174,7 @@ export async function inquiryBill(req, res) {
   }
 }
 
-// ==== Controller: BAYAR tagihan ====
+// ==== BAYAR tagihan ====
 // body: { invoiceId, pin }
 export async function payBill(req, res) {
   try {
@@ -184,58 +211,51 @@ export async function payBill(req, res) {
     if (!trx || trx.resellerId !== resellerId) {
       return res.status(404).json({ error: "Transaksi tidak ditemukan." });
     }
-    if (trx.type !== "TAGIHAN_INQUIRY") {
-      return res.status(400).json({ error: "invoiceId bukan transaksi inquiry tagihan." });
-    }
-    if (trx.status !== "QUOTED") {
-      return res.status(400).json({ error: `Transaksi tidak siap dibayar (status: ${trx.status}).` });
+    // Hanya boleh dari WAITING (hasil inquiry)
+    if (trx.type !== "TAGIHAN_INQUIRY" || trx.status !== "WAITING") {
+      return res.status(400).json({ error: `Transaksi tidak siap dibayar (type: ${trx.type}, status: ${trx.status}).` });
     }
     if (trx.expiresAt && trx.expiresAt.getTime() < Date.now()) {
       await prisma.transaction.update({ where: { id: trx.id }, data: { status: "EXPIRED" } });
       return res.status(400).json({ error: "Transaksi sudah kedaluwarsa." });
     }
 
-    // Nilai final sudah disimpan saat inquiry
+    // Nilai final dari inquiry
     const sellPrice = BigInt(trx.sellPrice || 0n);
     const adminFee = BigInt(trx.adminFee || 0n);
-    const totalNeed = sellPrice; // adminFee sudah termasuk dalam sellPrice (sellPrice = amountDue + baseAdminFee + markupSum)
+    const totalNeed = sellPrice;
 
-    // Cek & HOLD saldo
+    // HOLD saldo
     const saldo = await prisma.saldo.findUnique({ where: { resellerId } });
     if (!saldo) return res.status(400).json({ error: "Saldo reseller tidak ditemukan." });
     if (saldo.amount < totalNeed) {
       return res.status(400).json({ error: "Saldo tidak cukup untuk membayar tagihan." });
     }
 
-    // Update trx → TAGIHAN_PAY (PENDING), HOLD saldo, relink mutasi
+    // Update → TAGIHAN_PAY + WAITING (belum dikirim ke supplier), HOLD saldo, relink mutasi
     const updated = await prisma.$transaction(async (tx) => {
-      // 1) Ubah tipe & status untuk dibayar
       const t = await tx.transaction.update({
         where: { id: trx.id },
         data: {
           type: "TAGIHAN_PAY",
-          status: "PENDING",
-          // sellPrice/adminFee/markupSum/amountDue sudah ada dari inquiry
-          message: "PENDING (billing pay queued)"
+          status: "WAITING", // masih antri untuk dikirim ke supplier oleh worker
+          message: "WAITING (billing pay queued)",
+          supplierPayload: { ...(trx.supplierPayload || {}), step: "PAY" },
         },
       });
 
-      // 2) HOLD saldo (DEBIT amount positif)
       const before = saldo.amount;
       const after = before - totalNeed;
 
-      await tx.saldo.update({
-        where: { resellerId },
-        data: { amount: after },
-      });
+      await tx.saldo.update({ where: { resellerId }, data: { amount: after } });
 
       await tx.mutasiSaldo.create({
         data: {
           resellerId,
-          trxId: trx.id,            // pakai id transaksi (bukan invoice) supaya gampang di-refund
+          trxId: trx.id,
           type: "DEBIT",
           source: "TRX_HOLD",
-          amount: totalNeed,        // POSITIF
+          amount: totalNeed,
           beforeAmount: before,
           afterAmount: after,
           note: `Hold saldo untuk ${trx.invoiceId} (pembayaran tagihan)`,
@@ -246,19 +266,19 @@ export async function payBill(req, res) {
       return t;
     });
 
-    // enqueue job bayar tagihan
- await trxQueue.add('trx', { op: 'paybill', trxId: updated.id }, { attempts: 2, backoff: { type: 'exponential', delay: 3000 } });
+    // enqueue job bayar tagihan (worker yang akan callSupplier('paybill', ...) & update status selanjutnya)
+    await trxQueue.add('trx', { op: 'paybill', trxId: updated.id }, { attempts: 2, backoff: { type: 'exponential', delay: 3000 } });
 
     return res.json({
       ok: true,
       invoiceId,
       type: "TAGIHAN_PAY",
-      status: "PENDING",
+      status: "WAITING",
       amountDue: toNum(trx.amountDue),
       adminFee: toNum(adminFee),
       markupSum: toNum(trx.markupSum),
       sellPrice: toNum(sellPrice),
-      message: "Pembayaran diproses. Cek status berkala.",
+      message: "Pembayaran diantrikan. Menunggu eksekusi ke supplier.",
     });
   } catch (err) {
     console.error("payBill error:", err);
@@ -266,15 +286,21 @@ export async function payBill(req, res) {
   }
 }
 
-// ==== (Opsional) Inquiry only (fallback cepat) ====
-// Mirip inquiryBill, tapi jika supplier lambat, tandai PROCESSING & bisa dipolling.
+// ==== Inquiry only (fallback cepat) ====
+// body: { productCode, idNumber, dest, amount? }
 export async function inquiryOnly(req, res) {
   try {
-    const { productCode, customerNo } = req.body;
+    const { productCode, idNumber, dest, amount } = req.body;
     const resellerId = req.reseller.id;
 
-    if (!productCode || !customerNo) {
-      return res.status(400).json({ error: "productCode & customerNo wajib." });
+    if (!productCode) return res.status(400).json({ error: "productCode wajib." });
+    if (!idNumber || !dest) {
+      return res.status(400).json({ error: "idNumber (Nomor ID) dan dest (Nomor Tujuan) wajib." });
+    }
+
+    const amountSan = sanitizeAmount(amount);
+    if (amount != null && !amountSan) {
+      return res.status(400).json({ error: "amount tidak valid (harus angka tanpa pemisah)." });
     }
 
     const product = await prisma.product.findUnique({ where: { code: productCode } });
@@ -289,35 +315,45 @@ export async function inquiryOnly(req, res) {
     const invoiceId = `TRX-${Date.now()}`;
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
-    const headers = ep.apiKey ? { "x-api-key": ep.apiKey } : {};
-    const url = `${ep.baseUrl.replace(/\/+$/, "")}/inquiry`;
-    const body = { ref: invoiceId, sku: sp.supplierSku, customerNo };
-
     // balapan 5 detik
-    const payReq = axios.post(url, body, { headers, timeout: 15000 });
+    const reqPromise = callSupplier("inquiry", sp.supplier.code, {
+      baseUrl: ep.baseUrl,
+      apiKey: ep.apiKey || undefined,
+      secret: ep.secret || undefined,
+      ref: invoiceId,
+      product: sp.supplierSku,
+      customerNo: String(idNumber),
+      msisdn: String(dest),
+      ...(amountSan ? { amount: amountSan } : {}),
+    });
     const timeout5s = new Promise((resolve) => setTimeout(() => resolve("TIMEOUT"), 5000));
 
-    const raced = await Promise.race([payReq, timeout5s]);
+    const raced = await Promise.race([reqPromise, timeout5s]);
 
-    // === Jalur TIMEOUT: simpan PROCESSING & enqueue worker inquiry ===
+    // === TIMEOUT: simpan PROCESSING & enqueue worker inquiry ===
     if (raced === "TIMEOUT") {
       const trxCreated = await prisma.transaction.create({
         data: {
           invoiceId,
           resellerId,
           productId: product.id,
-          msisdn: customerNo,
+          msisdn: String(dest),
           type: "TAGIHAN_INQUIRY",
           sellPrice: 0n,
           adminFee: 0n,
-          markupSum: 0n,
-          amountDue: 0n,
+          ...(typeof 0n === "bigint" ? { markupSum: 0n, amountDue: 0n } : {}),
           status: "PROCESSING",
           supplierId: sp.supplierId,
           supplierRef: null,
           supplierPayload: {
             step: "INQUIRY",
-            request: body,
+            request: {
+              ref: invoiceId,
+              product: sp.supplierSku,
+              idNumber: String(idNumber),
+              dest: String(dest),
+              ...(amountSan ? { amount: amountSan } : {}),
+            },
             endpointId: ep.id,
             baseUrl: ep.baseUrl,
             supplierSku: sp.supplierSku
@@ -327,7 +363,20 @@ export async function inquiryOnly(req, res) {
         },
       });
 
-      // enqueue worker untuk lanjutkan inquiry (failover-ready)
+      // Realtime
+      emitTrxNew(req.app.locals.trxNsp, {
+        id: trxCreated.id,
+        invoiceId: trxCreated.invoiceId,
+        resellerId: trxCreated.resellerId,
+        productCode: product.code,
+        msisdn: trxCreated.msisdn,
+        amount: Number(trxCreated.sellPrice),
+        status: trxCreated.status, // PROCESSING
+        supplierName: (sp?.supplier?.name) || null,
+        message: trxCreated.message,
+        createdAt: trxCreated.createdAt,
+      });
+
       await trxQueue.add(
         'trx',
         { op: 'inquirybill', trxId: trxCreated.id },
@@ -343,59 +392,81 @@ export async function inquiryOnly(req, res) {
       });
     }
 
-    // === Jalur SUPPLIER BALAS CEPAT ===
-    const { data } = raced;
-    const amount = BigInt(data.amount ?? 0);
-    const supplierFee = BigInt(data.supplierFee ?? 0);
-    const supplierRef = data.supplierRef ?? data.ref ?? null;
+    // === Supplier balas cepat ===
+    const resIQ = raced;
+    if (!resIQ?.ok) {
+      return res.status(502).json({ error: "Gagal inquiry ke supplier.", detail: resIQ?.error || resIQ });
+    }
 
-    // hitung baseAdminFee & markupSum untuk hint harga
+    const norm = resIQ.norm || {};
+    const amountDue = BigInt(norm.amount ?? 0n);
+    const supplierFee = norm.adminFee ?? 0n;
+    const supplierRef = norm.supplierRef ?? null;
+
     const baseAdminFee = BigInt(product.margin ?? 0n);
     const baseDefault = BigInt(product.basePrice || 0n) + BigInt(product.margin || 0n);
     const { effectiveSell } = await computeEffectiveSellPrice(resellerId, product.id);
     let markupSum = BigInt(effectiveSell) - baseDefault;
     if (markupSum < 0n) markupSum = 0n;
-    const sellPrice = amount + baseAdminFee + markupSum;
+    const sellPrice = amountDue + baseAdminFee + markupSum;
 
     const trxCreated = await prisma.transaction.create({
       data: {
         invoiceId,
         resellerId,
         productId: product.id,
-        msisdn: customerNo,
+        msisdn: String(dest),
         type: "TAGIHAN_INQUIRY",
         sellPrice,
         adminFee: baseAdminFee,
         markupSum,
-        amountDue: amount,
-        status: "QUOTED", // karena respons cepat, langsung QUOTED
+        amountDue,
+        status: "WAITING", // sudah ada data, menunggu bayar
         supplierId: sp.supplierId,
         supplierRef,
         supplierPayload: {
           step: "INQUIRY",
-          request: body,
+          request: {
+            ref: invoiceId,
+            product: sp.supplierSku,
+            idNumber: String(idNumber),
+            dest: String(dest),
+            ...(amountSan ? { amount: amountSan } : {}),
+          },
           endpointId: ep.id,
           baseUrl: ep.baseUrl,
           supplierSku: sp.supplierSku,
           supplierFee
         },
-        supplierResult: data,
+        supplierResult: resIQ.data,
         expiresAt,
       },
     });
 
-    // (opsional) kalau mau tetap konsisten lewat worker untuk normalisasi vendor lain,
-    // kamu bisa enqueue juga, tapi biasanya tidak perlu kalau sudah QUOTED.
-    // await trxQueue.add('trx', { op: 'inquirybill', trxId: trxCreated.id }, { attempts: 2, backoff: { type: 'exponential', delay: 3000 } });
+    // Realtime
+    emitTrxNew(req.app.locals.trxNsp, {
+      id: trxCreated.id,
+      invoiceId: trxCreated.invoiceId,
+      resellerId: trxCreated.resellerId,
+      productCode: product.code,
+      msisdn: trxCreated.msisdn,
+      amount: Number(trxCreated.sellPrice),
+      status: trxCreated.status, // WAITING
+      supplierName: (sp?.supplier?.name) || null,
+      message: trxCreated.message,
+      createdAt: trxCreated.createdAt,
+    });
 
     return res.json({
       ok: true,
       invoiceId,
-      status: "OK",
-      customerNo,
-      customerName: data.customerName ?? null,
-      period: data.period ?? null,
-      amountDue: toNum(amount),
+      status: "WAITING",
+      idNumber: String(idNumber),
+      dest: String(dest),
+      ...(amountSan ? { amount: Number(amountSan) } : {}),
+      customerName: norm.extra?.customerName ?? null,
+      period: norm.extra?.period ?? null,
+      amountDue: toNum(amountDue),
       adminFee: toNum(baseAdminFee),
       markupSum: toNum(markupSum),
       sellPrice: toNum(sellPrice),

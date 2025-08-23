@@ -304,12 +304,11 @@ model Transaction {
   msisdn          String
   type            TransactionType   @default(TOPUP)
   sellPrice       BigInt
-  supplierPrice   BigInt
+  supplierPrice   BigInt            @default(0)
   adminFee        BigInt            @default(0)
   status          TransactionStatus @default(PENDING)
   supplierId      String?
-  supplierRef     String?
-
+  supplierRef     String?  
   supplierPayload Json?
   supplierResult  Json?
   callbackSentAt  DateTime?
@@ -318,7 +317,7 @@ model Transaction {
   expiresAt       DateTime?
   externalRefId   String?
   message         String?
-
+  serial          String?  
   reseller Reseller @relation(fields: [resellerId], references: [id])
   product  Product  @relation(fields: [productId], references: [id])
 
