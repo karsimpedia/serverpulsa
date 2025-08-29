@@ -18,6 +18,9 @@ function setAuthCookie(res, token) {
   });
 }
 
+
+
+
 export async function loginReseller(req, res) {
   try {
     const { username, password } = req.body || {};
@@ -85,7 +88,7 @@ export async function loginAdmin(req, res) {
     // if (!reseller.isActive) return res.status(403).json({ error: "Akun reseller non-aktif." });
 
     // buat token
-    const payload = { id: user.id, role: user.role, resellerId: reseller.id };
+    const payload = { id: user.id, role: user.role};
     const token = jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES });
 
     setAuthCookie(res, token);

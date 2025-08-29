@@ -371,11 +371,38 @@ export async function createProduct(req, res) {
 }
 
 
+export async function setProductPoint(req, res) {
+  try {
+    const { productId } = req.params;
+    let { pointValue } = req.body || {};
+    pointValue = Number.isFinite(pointValue) ? Math.max(0, Math.floor(pointValue)) : 0;
 
+    const updated = await prisma.product.update({
+      where: { id: productId },
+      data: { pointValue },
+      select: { id: true, code: true, name: true, pointValue: true },
+    });
+
+    return res.json({ ok: true, product: updated });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+}
 
 export async function upsertProduct(req, res) {
   try {
-    let { code, name, type, nominal, basePrice, margin, isActive, categoryId, categoryName } = req.body;
+    let { 
+      code, 
+      name, 
+      type, 
+      nominal, 
+      basePrice, 
+      margin, 
+      isActive, 
+      categoryId, 
+      categoryName,
+      pointValue   // ⬅️ ambil dari body
+    } = req.body;
 
     if (!code || !name || !type || basePrice == null) {
       return res.status(400).json({ error: "Field wajib: code,name,type,basePrice" });
@@ -386,6 +413,9 @@ export async function upsertProduct(req, res) {
     if (!allowedTypes.includes(type)) {
       return res.status(400).json({ error: "type harus PULSA atau TAGIHAN" });
     }
+
+    // Normalisasi pointValue
+    pointValue = Number.isFinite(pointValue) ? Math.max(0, Math.floor(pointValue)) : 0;
 
     // Kalau user kirim categoryName → buat/upsert kategori
     if (!categoryId && categoryName) {
@@ -407,6 +437,7 @@ export async function upsertProduct(req, res) {
         margin: BigInt(margin ?? 0),
         isActive: isActive ?? true,
         categoryId: categoryId || null,
+        pointValue,   // ⬅️ update
       },
       create: {
         code,
@@ -417,6 +448,7 @@ export async function upsertProduct(req, res) {
         margin: BigInt(margin ?? 0),
         isActive: isActive ?? true,
         categoryId: categoryId || null,
+        pointValue,   // ⬅️ create
       },
       include: { category: true },
     });

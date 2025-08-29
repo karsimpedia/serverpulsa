@@ -1,6 +1,6 @@
 // api/routes/transaction.js
 import express from "express";
-import authReseller from "../middleware/authReseller.js";
+
 import {
   listTransactions,
   dashboardTransactions,

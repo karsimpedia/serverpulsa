@@ -18,7 +18,69 @@ export async function getSaldo(req, res) {
   }
 }
 
-// GET mutasi saldo reseller login
+// list transaksi reseller Login
+export async function listTransactions(req, res) {
+  try {
+    const resellerId = req.user?.resellerId;
+    if (!resellerId) {
+      return res.status(401).json({ error: "Unauthorized (resellerId tidak ada)" });
+    }
+
+    const page = Math.max(parseInt(req.query.page || "1", 10), 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit || "20", 10), 1), 200);
+    const skip = (page - 1) * limit;
+
+    const { status, msisdn, idOrInvoice, q } = req.query;
+
+    const where = { resellerId };
+    if (status) where.status = String(status).toUpperCase();
+    if (msisdn) where.msisdn = { contains: msisdn, mode: "insensitive" };
+    if (idOrInvoice) {
+      where.OR = [
+        { id: idOrInvoice },
+        { invoiceId: idOrInvoice }
+      ];
+    }
+    if (q) {
+      where.OR = [
+        { msisdn: { contains: q, mode: "insensitive" } },
+        { invoiceId: { contains: q, mode: "insensitive" } }
+      ];
+    }
+
+    const [total, data] = await Promise.all([
+      prisma.transaction.count({ where }),
+      prisma.transaction.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          invoiceId: true,
+          msisdn: true,
+          status: true,
+          sellPrice: true,
+          createdAt: true,
+          product: { select: { code: true, name: true, nominal: true } },
+        }
+      }),
+    ]);
+
+    res.json({
+      page,
+      limit,
+      total,
+      resellerId,
+      data,
+    });
+  } catch (err) {
+    console.error("listTransactions error:", err);
+    res.status(500).json({ error: "Gagal memuat data transaksi" });
+  }
+}
+
+// GET mutasi saldo resller by admin
 export async function getMutasi(req, res) {
 
   const id = req.params.id
@@ -42,6 +104,31 @@ export async function getMutasi(req, res) {
     res.status(500).json({ error: "Gagal mengambil mutasi saldo" });
   }
 }
+
+export async function getMutasibyReseller(req, res) {
+
+  const id = req.user.id
+  try {
+    const take = Number(req.query.take || 20);
+    const skip = Number(req.query.skip || 0);
+    const rows = await prisma.mutasiSaldo.findMany({
+      where: { resellerId: id },
+      orderBy: { createdAt: "desc" },
+      skip,
+      take,
+    });
+    res.json(
+      rows.map((r) => ({
+        ...r,
+        amount: Number(r.amount),
+      }))
+    );
+  } catch (err) {
+    console.error("Get mutasi error:", err);
+    res.status(500).json({ error: "Gagal mengambil mutasi saldo" });
+  }
+}
+
 
 // POST buat callback per reseller
 export async function createResellerCallback(req, res) {
@@ -271,7 +358,7 @@ export async function updateReseller(req, res) {
   }
 }
 
-// Delete reseller
+// Delete reseller admin
 export async function deleteReseller(req, res) {
   try {
     const { id } = req.params;
@@ -286,3 +373,68 @@ export async function deleteReseller(req, res) {
     res.status(500).json({ error: "Internal server error" });
   }
 }
+
+
+
+
+/**
+ * GET /api/reseller/downlines
+ * Mengembalikan daftar downline langsung dari reseller login
+ * Response:
+ * {
+ *   "resellerId": "LA0001",
+ *   "total": 2,
+ *   "downlines": [
+ *     { "id": "LA0003", "name": "Downline A", "phone": "0812...", "createdAt": "..." },
+ *     { "id": "LA0004", "name": "Downline B", "phone": "0813...", "createdAt": "..." }
+ *   ]
+ * }
+ */
+
+function toPlain(obj) {
+  return JSON.parse(
+    JSON.stringify(obj, (_, v) => (typeof v === "bigint" ? v.toString() : v))
+  );
+}
+
+export async function listMyDownlines(req, res) {
+  try {
+    const meId = req.user?.resellerId;
+    if (!meId) return res.status(401).json({ error: "Unauthorized (resellerId tidak ada)" });
+
+    const downlines = await prisma.reseller.findMany({
+      where: { parentId: meId },
+      select: {
+        id: true,
+        name: true,
+        createdAt: true,
+        // NB: back-relation kamu didefinisikan sebagai array.
+        // Ambil elemen pertama saja (harusnya one-to-one).
+        ResellerGlobalMarkup: {
+          select: { markup: true },
+        },
+      },
+      orderBy: { createdAt: "asc" },
+    });
+
+    const withMarkup = downlines.map((d) => ({
+      id: d.id,
+      name: d.name,
+      createdAt: d.createdAt,
+      // kalau belum ada record global markup, default 0n
+      markup: (d.ResellerGlobalMarkup?.[0]?.markup ?? 0n),
+    }));
+
+    return res.json(
+      toPlain({
+        resellerId: meId,
+        total: withMarkup.length,
+        downlines: withMarkup,
+      })
+    );
+  } catch (err) {
+    console.error("listMyDownlines error:", err);
+    res.status(500).json({ error: "Gagal memuat daftar downline" });
+  }
+}
+

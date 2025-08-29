@@ -56,7 +56,10 @@ function digest({ algo, input, key, encoding = "hex", uppercase = false }) {
   }
 
   if (encoding === "base64url") {
-    out = String(out).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+    out = String(out)
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/g, "");
   }
   if (uppercase) out = String(out).toUpperCase();
   return out;
@@ -66,7 +69,11 @@ function parseBigIntSafe(v) {
   if (v == null) return null;
   const num = String(v).replace(/[^\d]/g, "");
   if (!num) return null;
-  try { return BigInt(num); } catch { return null; }
+  try {
+    return BigInt(num);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -84,6 +91,7 @@ function applySignature({ ctx, headers, body, query, spec }) {
   if (!spec) return { ctx, headers, body, query };
 
   const input = render(spec.template || "", ctx);
+
   const key = render(spec.keyTemplate || "", ctx);
   const signature = digest({
     algo: spec.type || "md5",
@@ -109,25 +117,31 @@ function applySignature({ ctx, headers, body, query, spec }) {
  * ctx:
  * {
  *   baseUrl, apiKey, secret?, ref, product?, sku?, msisdn, customerNo, amount,
- *   // Fallback tanpa config (default -> body):
+ *   // Fallback tanpa config (default -> body/query):
  *   pin?, pinPlace? ("body"|"query"), pinField? ("pin"),
  *   // Member/reseller ID (satu sumber dari form "Member ID"):
  *   uid?, memberId?, idMember?, memberID?, idReseller?, resellerId?,
  *   memberPlace? ("body"|"query"), memberField? ("memberID"),
+ *   // Optional:
+ *   username?,
  *   ...
  * }
  */
 export async function callSupplier(op, supplierCode, ctx) {
   // 1) Ambil konfigurasi supplier & operasi
   const sc = await getSupplierConfigByCode(supplierCode);
+  console.log("sc", sc);
   if (!sc) throw new Error(`Supplier ${supplierCode} tidak ditemukan`);
   const conf = sc.ops?.[op];
-  if (!conf) throw new Error(`Operation ${op} tidak dikonfigurasi untuk ${supplierCode}`);
+  if (!conf)
+    throw new Error(
+      `Operation ${op} tidak dikonfigurasi untuk ${supplierCode}`
+    );
 
   // 2) Context + waktu + fallback dari defaults + alias uid/memberId + pin + product
   const now = Date.now();
 
-  // Resolve Member ID (ctx → defaults)
+  // Resolve Member ID (ctx → defaults.credentials → defaults.*)
   const resolvedMemberId =
     ctx.uid ??
     ctx.memberId ??
@@ -135,14 +149,32 @@ export async function callSupplier(op, supplierCode, ctx) {
     ctx.memberID ??
     ctx.idReseller ??
     ctx.resellerId ??
+    sc?.defaults?.credentials?.memberId ??
     sc?.defaults?.uid ??
     sc?.defaults?.memberId ??
     null;
 
-  // Resolve PIN (ctx → defaults)
-  const resolvedPin = ctx.pin ?? sc?.defaults?.pin ?? null;
+  // Resolve PIN (ctx → defaults.credentials → defaults.pin)
+  const resolvedPin =
+    ctx.pin ?? sc?.defaults?.credentials?.pin ?? sc?.defaults?.pin ?? null;
 
-  // Resolve PRODUCT/SKU (ctx → defaults)
+  // Resolve USERNAME (ctx → defaults.credentials → defaults.username)
+  const resolvedUsername =
+    ctx.username ??
+    sc?.defaults?.credentials?.username ??
+    sc?.defaults?.username ??
+    null;
+
+  // Resolve PASSWORD (ctx → defaults.credentials.password → defaults.password)
+  const resolvedPassword =
+    ctx.password ??
+    ctx.pass ??
+    ctx.pwd ??
+    sc?.defaults?.credentials?.password ??
+    sc?.defaults?.password ??
+    null;
+
+  // Resolve PRODUCT/SKU (ctx → defaults.*)
   const resolvedProduct =
     ctx.product ??
     ctx.sku ??
@@ -160,9 +192,13 @@ export async function callSupplier(op, supplierCode, ctx) {
     nowMs: now,
     nowSec: Math.floor(now / 1000),
     nowIso: new Date(now).toISOString(),
-    secret: ctx.secret ?? sc.defaults?.secret,
+    // secret: ctx → defaults.webhook.secret → (legacy) defaults.secret
+    secret: ctx.secret ?? sc?.defaults?.webhook?.secret ?? sc?.defaults?.secret,
 
     ...ctx, // izinkan override field lain
+
+    // Username untuk templating/sign jika diperlukan
+    username: resolvedUsername ?? ctx.username,
 
     // alias konsisten untuk templating (Member ID)
     uid: resolvedMemberId,
@@ -178,9 +214,13 @@ export async function callSupplier(op, supplierCode, ctx) {
     codeProduk: resolvedProduct,
     kodeProduk: resolvedProduct,
     kodeproduk: resolvedProduct,
-
+    // alias tujuan & referensi untuk template OtomaX
+    dest: ctx.dest ?? ctx.msisdn ?? ctx.customerNo ?? null,
+    refID: ctx.refID ?? ctx.ref ?? null,
+    ref: ctx.ref ?? ctx.refID ?? null,
     // PIN final
     pin: resolvedPin,
+    password: resolvedPassword,
   };
 
   // 3) Render endpoint dasar
@@ -190,7 +230,7 @@ export async function callSupplier(op, supplierCode, ctx) {
 
   // 4) Render headers/body/query dari template
   let headers = { ...(sc.defaults?.headers || {}) };
-  headers = { ...headers, ...(render(conf.headers || {}, baseCtx)) };
+  headers = { ...headers, ...render(conf.headers || {}, baseCtx) };
   let body = render(conf.body || {}, baseCtx) || {};
   let query = render(conf.query || {}, baseCtx) || {};
 
@@ -219,8 +259,15 @@ export async function callSupplier(op, supplierCode, ctx) {
   }
 
   // 7) Signature (conf.sign > defaults.sign)
+  console.log(conf.sign);
   const signSpec = conf.sign || sc.defaults?.sign;
-  ({ ctx: baseCtx, headers, body, query } = applySignature({
+
+  ({
+    ctx: baseCtx,
+    headers,
+    body,
+    query,
+  } = applySignature({
     ctx: baseCtx,
     headers,
     body,
@@ -253,7 +300,8 @@ export async function callSupplier(op, supplierCode, ctx) {
     if (bodyType === "form") {
       axiosCfg.headers["Content-Type"] = "application/x-www-form-urlencoded";
       const usp = new URLSearchParams();
-      for (const [k, v] of Object.entries(body)) usp.append(k, v == null ? "" : String(v));
+      for (const [k, v] of Object.entries(body))
+        usp.append(k, v == null ? "" : String(v));
       axiosCfg.data = usp.toString();
     } else {
       axiosCfg.headers["Content-Type"] = "application/json";
@@ -265,6 +313,7 @@ export async function callSupplier(op, supplierCode, ctx) {
   let resp;
   try {
     resp = await axios.request(axiosCfg);
+    console.log(resp)
   } catch (e) {
     // HTTP error (4xx/5xx) masih punya response -> tetap diparse
     if (e?.response) {
@@ -272,7 +321,11 @@ export async function callSupplier(op, supplierCode, ctx) {
     } else {
       // murni transport/timeout/dns
       console.error("[supplier-client] transport error:", e?.message || e);
-      return { ok: false, transportError: true, error: e?.message || String(e) };
+      return {
+        ok: false,
+        transportError: true,
+        error: e?.message || String(e),
+      };
     }
   }
 
@@ -284,8 +337,12 @@ export async function callSupplier(op, supplierCode, ctx) {
   const message = getPath(data, conf.response?.messagePath) ?? status;
   const supplierRef = getPath(data, conf.response?.supplierRefPath) ?? null;
 
-  const amountStr = conf.response?.amountPath ? getPath(data, conf.response.amountPath) : null;
-  const adminFeeStr = conf.response?.adminFeePath ? getPath(data, conf.response.adminFeePath) : null;
+  const amountStr = conf.response?.amountPath
+    ? getPath(data, conf.response.amountPath)
+    : null;
+  const adminFeeStr = conf.response?.adminFeePath
+    ? getPath(data, conf.response.adminFeePath)
+    : null;
 
   const extra = {};
   if (conf.response?.extraPaths) {

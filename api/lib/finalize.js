@@ -18,7 +18,50 @@ async function findHoldAmount(trxId) {
  * PENTING: Tidak ada payout komisi di sini.
  * Payout komisi dilakukan di worker setelah memanggil finalizeSuccess.
  */
+
+
+const toSafeJson = (v) =>
+  JSON.parse(JSON.stringify(v, (_k, x) => (typeof x === 'bigint' ? x.toString() : x)));
+
+export async function finalizeSuccessTx(tx, trxId, { message, supplierResult } = {}) {
+  const safe = supplierResult == null ? undefined : toSafeJson(supplierResult);
+  const r = await tx.transaction.updateMany({
+    where: { id: trxId, status: { notIn: ['SUCCESS','REFUNDED','CANCELED','EXPIRED'] } },
+    data: {
+      status: 'SUCCESS',
+      message: message || 'SUCCESS',
+      ...(safe !== undefined ? { supplierResult: safe } : {}),
+    },
+  });
+  return r.count; // 0 = sudah final / tidak berubah; 1 = sukses update
+}
+
+export async function finalizeFailedTx(tx, trxId, { message, supplierResult } = {}) {
+  const safe = supplierResult == null ? undefined : toSafeJson(supplierResult);
+  const r = await tx.transaction.updateMany({
+    where: { id: trxId, status: { notIn: ['SUCCESS','REFUNDED','CANCELED','EXPIRED'] } },
+    data: {
+      status: 'FAILED',
+      message: message || 'FAILED',
+      ...(safe !== undefined ? { supplierResult: safe } : {}),
+    },
+  });
+  return r.count;
+}
+
+// // (opsional) tetap sediakan versi non-Tx kalau dipanggil di luar transaksi:
+// export async function finalizeSuccess(trxId, opts) {
+//   return prisma.$transaction((tx) => finalizeSuccessTx(tx, trxId, opts), { timeout: 15000 });
+// }
+// export async function finalizeFailed(trxId, opts) {
+//   return prisma.$transaction((tx) => finalizeFailedTx(tx, trxId, opts), { timeout: 15000 });
+// }
+
+
+
 export async function finalizeSuccess(trxId, { message, supplierResult } = {}) {
+
+  
   await prisma.$transaction(async (tx) => {
     // Optional guard: hindari downgrade status
     const cur = await tx.transaction.findUnique({

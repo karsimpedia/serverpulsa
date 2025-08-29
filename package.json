@@ -2,6 +2,9 @@
   "name": "engine-pulsa",
   "version": "1.0.0",
   "type": "module",
+  "prisma": {
+  "seed": "node prisma/seed.js"
+},
   "scripts": {
     "api": "node api/api.js",
     "worker": "node worker/index.js",

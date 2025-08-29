@@ -9,10 +9,9 @@ import cookieParser from "cookie-parser";
 import prisma from "./prisma.js";
 import { setupSocketIOServer } from "./socket.js";
 import { setupRealtimeBridge } from "./realtime-subscriber.js";
-
 import monitorRoutes from "./routes/monitor.js";         // ← untuk /api/admin/transactions & /stats
-import authReseller from "./middleware/authReseller.js";
 
+import resellerOnly  from "./routes/reseller/reseller.js"
 import { createBullBoard } from "@bull-board/api";
 import { BullMQAdapter } from "@bull-board/api/bullMQAdapter.js";
 import { ExpressAdapter } from "@bull-board/express";
@@ -29,6 +28,7 @@ import categoryRoutes from "./routes/category.js";
 import authRoutes from "./routes/auth.js";
 import adminRoute from "./routes/admin.js";
 import downlineRoutes from "./routes/downline.js"
+import callBack from "./routes/callback.js"
 const app = express();
 
 /** =========================
@@ -112,6 +112,8 @@ app.set('json replacer', (key, value) => {
 /** =========================
  *  Routes
  *  ======================== */
+app.use("/reseller", resellerOnly)
+app.use("/api/callback", callBack)
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoute);
 app.use("/api/trx", trxRoutes);

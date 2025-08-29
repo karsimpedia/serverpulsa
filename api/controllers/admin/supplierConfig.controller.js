@@ -1,18 +1,9 @@
 import prisma from '../../prisma.js';
 import { invalidateSupplierConfigCache } from '../../lib/supplier-registry-db.js';
 import { callSupplier } from '../../lib/supplier-client.js';
+import { validateOps } from '../../../utils/supplierConfigValidator.js';
 // Validasi sederhana struktur ops
-function validateOps(ops) {
-  if (!ops || typeof ops !== 'object') throw new Error('ops wajib berupa object');
-  // ops.{topup|inquiry|paybill|callback}? -> object { method, path, headers?, body?, response? }
-  const allowedOps = ['topup', 'inquiry', 'paybill', 'callback'];
-  for (const k of Object.keys(ops)) {
-    if (!allowedOps.includes(k)) throw new Error(`ops.${k} tidak dikenali`);
-    const v = ops[k];
-    if (!v || typeof v !== 'object') throw new Error(`ops.${k} harus object`);
-    if (!v.method || !v.path || !v.response) throw new Error(`ops.${k} butuh method, path, response`);
-  }
-}
+
 
 // GET /admin/suppliers/:id/config
 export async function getSupplierConfig(req, res) {
@@ -46,7 +37,7 @@ export async function upsertSupplierConfig(req, res) {
       update: { version: Number(version), defaults, ops }
     });
 
-    invalidateSupplierConfigCache(code);
+    // invalidateSupplierConfigCache(code);
     res.json({ ok: true, data });
   } catch (e) { res.status(400).json({ error: e.message }); }
 }

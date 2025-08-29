@@ -4,7 +4,7 @@ import { pickCandidatesForWorker } from '../../utils/supplierPicker.js';
 import { callSupplier } from '../../api/lib/supplier-client.js';
 import { finalizeSuccess, finalizeFailed } from '../../api/lib/finalize.js';
 import { pushTrxUpdate } from '../utils/socket.js';
-
+import { awardPointsForSuccess, reversePointsOnRefund } from "../../api/lib/points.service.js";
 const SERIAL_KEYS = [
   'serial', 'sn', 'serialNo', 'serial_number',
   'voucherCode', 'voucher_code',
@@ -129,7 +129,7 @@ export async function processTopup(trxId) {
 
       const res = await callSupplier('topup', supplierCode, ctx);
       if (!res.ok) { lastErr = res.error || 'transport'; continue; }
-
+// console.log(res, ctx )
       // Deteksi serial/token (baik dari norm.extra.serial maupun raw)
       const serialFromNorm = res.norm?.extra?.serial;
       const serialFromRaw  = deepFindByKeys(res.data, SERIAL_KEYS);
@@ -149,6 +149,7 @@ export async function processTopup(trxId) {
       const msg = res.norm?.message || st || 'PROCESSING';
 
       if (st === 'SUCCESS') {
+        await awardPointsForSuccess(trxId);
         await finalizeSuccess(trxId, { message: res.norm?.message || 'SUCCESS', supplierResult: res.data });
         await pushTrxUpdate(trxId, { status: 'SUCCESS', message: res.norm?.message || 'SUCCESS', ...(serial ? { serial } : {}) });
         return;

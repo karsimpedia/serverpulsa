@@ -17,26 +17,26 @@ function parseMarkup(v) {
  * Cek apakah uplineId adalah ancestor (upline di level berapapun) dari targetId.
  * Return true kalau iya. Tidak mengizinkan self (uplineId === targetId) secara default.
  */
-async function isAncestorOf(uplineId, targetId) {
-  if (!uplineId || !targetId) return false;
-  if (uplineId === targetId) return false; // ubah ke true kalau mau izinkan self
-  let cur = targetId;
-  const seen = new Set();
-  for (let i = 0; i < 50 && cur; i++) {
-    if (seen.has(cur)) break; // guard siklus
-    seen.add(cur);
-    const r = await prisma.reseller.findUnique({
-      where: { id: cur },
-      select: { parentId: true }
+async function isAncestorOf(uplineId, childId) {
+  if (!uplineId || !childId || uplineId === childId) return false;
+  let node = await prisma.reseller.findUnique({
+    where: { id: childId },
+    select: { parentId: true },
+  });
+  const seen = new Set([childId]);
+  let hop = 0;
+  while (node?.parentId && hop < 50) {
+    if (node.parentId === uplineId) return true;
+    if (seen.has(node.parentId)) break; // antisipasi loop
+    seen.add(node.parentId);
+    node = await prisma.reseller.findUnique({
+      where: { id: node.parentId },
+      select: { parentId: true },
     });
-    const p = r?.parentId || null;
-    if (!p) break;
-    if (p === uplineId) return true;
-    cur = p;
+    hop++;
   }
   return false;
 }
-
 
 
 export async function upsertResellerMarkup(req, res) {
@@ -160,5 +160,74 @@ export async function setGlobalMarkupForDownline(req, res) {
   } catch (e) {
     console.error("setGlobalMarkupForDownline error:", e);
     return res.status(500).json({ error: e.message });
+  }
+}
+
+function toPlain(obj) {
+  return JSON.parse(
+    JSON.stringify(obj, (_, v) => (typeof v === "bigint" ? v.toString() : v))
+  );
+}
+export async function setDownlineGlobalMarkup(req, res) {
+  try {
+    const meId = req.user?.resellerId || null;
+    const role = req.user?.role || "RESELLER";
+    const downlineId = String(req.params.downlineId || "").trim().toUpperCase(); 
+
+    if (!meId) return res.status(401).json({ error: "Unauthorized (resellerId tidak ada)" });
+    if (!downlineId) return res.status(400).json({ error: "Param downlineId wajib" });
+
+    const { markup } = req.body || {};
+    if (markup == null) return res.status(400).json({ error: "markup wajib" });
+
+    // Validasi → BigInt integer, >= 0
+    let mk;
+    try {
+      if (String(markup).includes(".")) {
+        return res.status(400).json({ error: "markup harus bilangan bulat (integer)" });
+      }
+      mk = BigInt(markup);
+    } catch {
+      return res.status(400).json({ error: "markup harus integer yang valid" });
+    }
+    if (mk < 0n) return res.status(400).json({ error: "markup tidak boleh negatif" });
+    if (mk > 100000n) {
+      return res.status(400).json({ error: "markup terlalu besar (maks 100000)" });
+    }
+
+    // Pastikan target downline ada
+    const target = await prisma.reseller.findUnique({
+      where: { id: downlineId },
+      select: { id: true, parentId: true, name: true },
+    });
+    if (!target) return res.status(404).json({ error: "Reseller target tidak ditemukan" });
+
+    // Izin: ADMIN atau ancestor
+    if (role !== "ADMIN") {
+      const allowed = await isAncestorOf(meId, downlineId);
+      if (!allowed) {
+        return res.status(403).json({ error: "Forbidden: bukan upline/ancestor dari target" });
+      }
+    }
+
+    // Upsert ke tabel ResellerGlobalMarkup (pk: resellerId)
+    const record = await prisma.resellerGlobalMarkup.upsert({
+      where: { resellerId: downlineId },
+      create: { resellerId: downlineId, markup: mk },
+      update: { markup: mk },
+    });
+
+    return res.json(
+      toPlain({
+        ok: true,
+        uplineId: meId,
+        downlineId,
+        markup: mk,   // akan jadi string oleh toPlain()
+        record,       // termasuk field BigInt di-convert oleh toPlain
+      })
+    );
+  } catch (e) {
+    console.error("setDownlineGlobalMarkup error:", e);
+    return res.status(500).json({ error: e.message || "Gagal set global markup downline" });
   }
 }

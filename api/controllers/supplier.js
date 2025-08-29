@@ -38,18 +38,85 @@ export const getAllSuppliers = async (req, res) => {
 };
 
 // Get a single supplier by ID
+
+
+// util untuk masking kredensial
+function mask(s = "", left = 4, right = 2) {
+  const str = String(s || "");
+  if (!str) return "";
+  if (str.length <= left + right) return "*".repeat(Math.max(str.length, 4));
+  return str.slice(0, left) + "*".repeat(str.length - left - right) + str.slice(-right);
+}
+
+// Get a single supplier by ID + endpoints + config
 export const getSupplierById = async (req, res) => {
   try {
     const { id } = req.params;
-    const supplier = await prisma.supplier.findUnique({ where: { id } });
-    if (!supplier)
+    // opsi: ?revealSecrets=1 buat admin (kalau kamu sudah punya auth/role)
+    const reveal = String(req.query.revealSecrets || "") === "1";
+
+    const supplier = await prisma.supplier.findUnique({
+      where: { id },
+      include: {
+        endpoints: {
+          select: {
+            id: true,
+            name: true,
+            baseUrl: true,
+            apiKey: true,
+            secret: true,
+            isActive: true,
+            // tambahkan field lain kalau ada, mis. headers, timeoutMs, dsb
+          },
+          orderBy: { name: "asc" },
+        },
+        config: true, // ambil record config (mis. ops, defaults, statusAlias, dsb)
+      },
+    });
+
+    if (!supplier) {
       return res.status(404).json({ error: "Supplier not found." });
-    res.json({ data: supplier });
+    }
+
+    // siapkan payload aman (masking kunci)
+    const endpoints = (supplier.endpoints || []).map((e) => ({
+      id: e.id,
+      name: e.name,
+      baseUrl: e.baseUrl,
+      isActive: e.isActive,
+      apiKey: reveal ? e.apiKey : mask(e.apiKey),
+      secret: reveal ? e.secret : mask(e.secret),
+    }));
+
+    // jika SupplierConfig menyimpan JSON (mis. field `data`), parse-kan
+    // sesuaikan dengan skema kamu; contoh di bawah:
+    let config = supplier.config || null;
+    if (config && typeof config.data === "string") {
+      try {
+        config = { ...config, data: JSON.parse(config.data) };
+      } catch {
+        // biarkan apa adanya kalau gagal parse
+      }
+    }
+
+    return res.json({
+      data: {
+        id: supplier.id,
+        name: supplier.name,
+        code: supplier.code,
+        status: supplier.status,
+        createdAt: supplier.createdAt,
+        updatedAt: supplier.updatedAt,
+        endpoints,
+        config, // berisi konfigurasi supplier (ops, mapping callback, defaults, dll.)
+      },
+    });
   } catch (err) {
     console.error("Fetch supplier error:", err);
-    res.status(500).json({ error: "Internal server error." });
+    return res.status(500).json({ error: "Internal server error." });
   }
 };
+
 
 // Update a supplier
 export const updateSupplier = async (req, res) => {

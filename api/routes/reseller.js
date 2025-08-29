@@ -2,7 +2,7 @@
 
 import express from "express"
 const routeReseller = express.Router();
-import authReseller from "../middleware/authReseller.js";
+
 
 import { registerReseller, resellerList , updateReseller, deleteReseller, getSaldo, getMutasi, createResellerCallback} from "../controllers/reseller.js";
 // Register new reseller

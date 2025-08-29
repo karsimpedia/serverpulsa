@@ -1,9 +1,22 @@
 // api/controllers/callback.js
 import crypto from "crypto";
 import prisma from "../prisma.js";
-import { finalizeFailed, finalizeSuccess } from "../lib/finalize.js";
+import {
+  finalizeFailed,
+  finalizeSuccess,
+  finalizeSuccessTx,
+} from "../lib/finalize.js";
+import { pushTrxUpdate } from "../../worker/utils/socket.js";
+import { emitTrxUpdate } from "../lib/realtime.js";
+import { awardPointsForSuccess } from "../lib/points.service.js";
 
-const FINAL_STATES = new Set(["SUCCESS", "FAILED", "REFUNDED", "CANCELED", "EXPIRED"]);
+const FINAL_STATES = new Set([
+  "SUCCESS",
+  "FAILED",
+  "REFUNDED",
+  "CANCELED",
+  "EXPIRED",
+]);
 
 // ===== Helpers =====
 function pick(obj, path, fallback) {
@@ -31,18 +44,24 @@ function parseAmountToInt(v) {
   return Math.round(num);
 }
 
-function verifySignature(req, secret, headerName = "x-signature", algo = "sha256") {
+function verifySignature(
+  req,
+  secret,
+  headerName = "x-signature",
+  algo = "sha256"
+) {
   if (!secret) return true;
   try {
     const sig =
-      req.headers[headerName] ||
-      req.headers[headerName.toLowerCase()] ||
-      "";
+      req.headers[headerName] || req.headers[headerName.toLowerCase()] || "";
     // dukung rawBody kalau ada, fallback stringify body
     const bodyRaw = req.rawBody || JSON.stringify(req.body || {});
     const a = String(algo || "sha256").toLowerCase();
     if (a.startsWith("hmac-")) {
-      const hmac = crypto.createHmac(a.replace("hmac-", ""), secret).update(bodyRaw).digest("hex");
+      const hmac = crypto
+        .createHmac(a.replace("hmac-", ""), secret)
+        .update(bodyRaw)
+        .digest("hex");
       return sig === hmac || sig?.toLowerCase?.() === hmac.toLowerCase();
     } else {
       const dig = crypto.createHash(a).update(bodyRaw).digest("hex");
@@ -57,11 +76,17 @@ function normStatus(raw, aliasMap) {
   const s = String(raw ?? "").trim();
   const up = s.toUpperCase();
   const mapped = (aliasMap && (aliasMap[s] || aliasMap[up])) || up;
-  if (["OK","SUCCESS","SUKSES","DONE","COMPLETED"].includes(mapped)) return "SUCCESS";
-  if (["FAIL","FAILED","ERROR"].includes(mapped)) return "FAILED";
-  if (["CANCEL","CANCELED","CANCELLED"].includes(mapped)) return "CANCELED";
-  if (["EXPIRE","EXPIRED","TIMEOUT"].includes(mapped)) return "EXPIRED";
-  if (["PENDING","PROCESS","PROCESSING","INPROGRESS","WAITING"].includes(mapped)) return "PROCESSING";
+  if (["OK", "SUCCESS", "SUKSES", "DONE", "COMPLETED"].includes(mapped))
+    return "SUCCESS";
+  if (["FAIL", "FAILED", "ERROR"].includes(mapped)) return "FAILED";
+  if (["CANCEL", "CANCELED", "CANCELLED"].includes(mapped)) return "CANCELED";
+  if (["EXPIRE", "EXPIRED", "TIMEOUT"].includes(mapped)) return "EXPIRED";
+  if (
+    ["PENDING", "PROCESS", "PROCESSING", "INPROGRESS", "WAITING"].includes(
+      mapped
+    )
+  )
+    return "PROCESSING";
   return "PROCESSING";
 }
 
@@ -98,20 +123,28 @@ function extractCallbackConfig(configRow) {
     signatureHeader: cb.signatureHeader || defWebhook.header || "x-signature",
     secret: cb.secret || defWebhook.secret || "",
     sigAlgo: cb.sigAlgo || defWebhook.sigAlgo || "sha256",
-
+    msisdn: cb.msisdn || "msisdn",
     // ⬇️ BARU: mapping Serial Number
-    serialField: cb.serialField || null,                // string
-    serialFields: Array.isArray(cb.serialFields) ? cb.serialFields : (cb.serialField ? [cb.serialField] : []),
-    serialRegex: cb.serialRegex || null,                // regex string with 1 capture group
-    serialSourceField: cb.serialSourceField || null,    // default: messageField
+    serialField: cb.serialField || null, // string
+    serialFields: Array.isArray(cb.serialFields)
+      ? cb.serialFields
+      : cb.serialField
+      ? [cb.serialField]
+      : [],
+    serialRegex: cb.serialRegex || null, // regex string with 1 capture group
+    serialSourceField: cb.serialSourceField || null, // default: messageField
   };
 }
 
 // ===== Controller utama =====
 export async function supplierCallbackUniversal(req, res) {
+  // console.log(req.body)
   try {
-    const supplierCode = String(req.params?.supplierCode || "").trim().toUpperCase();
-    if (!supplierCode) return res.json({ ok: false, error: "supplierCode missing" });
+    const supplierCode = String(req.params?.supplierCode || "")
+      .trim()
+      .toUpperCase();
+    if (!supplierCode)
+      return res.json({ ok: false, error: "supplierCode missing" });
 
     // 1) Ambil supplier & config
     const supplier = await prisma.supplier.findFirst({
@@ -122,17 +155,38 @@ export async function supplierCallbackUniversal(req, res) {
 
     const cfgRow = await prisma.supplierConfig.findUnique({
       where: { supplierId: supplier.id },
-      select: { id: true, version: true, defaults: true, ops: true, updatedAt: true },
+      select: {
+        id: true,
+        version: true,
+        defaults: true,
+        ops: true,
+        updatedAt: true,
+      },
     });
-    if (!cfgRow) return res.json({ ok: false, error: "supplier config not found" });
+    if (!cfgRow)
+      return res.json({ ok: false, error: "supplier config not found" });
 
     const cfg = extractCallbackConfig(cfgRow);
 
     // 2) Ambil ref/status/message/price dari payload sesuai mapping
-    const ref     = pick(req.body || {}, cfg.refField,     req.query?.ref || null);
-    const status  = pick(req.body || {}, cfg.statusField,  req.query?.status || null);
-    const message = pick(req.body || {}, cfg.messageField, req.query?.message || null);
-    const priceRaw = cfg.priceField ? pick(req.body || {}, cfg.priceField, null) : null;
+    const ref = pick(
+      req.body || {},
+      cfg.refField,
+      req.query?.ref || req.body?.ref || null
+    );
+    const status = pick(
+      req.body || {},
+      cfg.statusField,
+      req.query?.status || req.body.status || null
+    );
+    const message = pick(
+      req.body || {},
+      cfg.messageField,
+      req.query?.message || null
+    );
+    const priceRaw = cfg.priceField
+      ? pick(req.body || {}, cfg.priceField, null)
+      : null;
     const supplierPrice = parseAmountToInt(priceRaw);
 
     if (!ref || !status) {
@@ -140,7 +194,12 @@ export async function supplierCallbackUniversal(req, res) {
     }
 
     // 3) Verifikasi signature (jika secret diset)
-    const signatureOK = verifySignature(req, cfg.secret, cfg.signatureHeader, cfg.sigAlgo);
+    const signatureOK = verifySignature(
+      req,
+      cfg.secret,
+      cfg.signatureHeader,
+      cfg.sigAlgo
+    );
     if (cfg.secret && !signatureOK) {
       return res.json({ ok: false, error: "invalid signature" });
     }
@@ -153,16 +212,32 @@ export async function supplierCallbackUniversal(req, res) {
 
     let trx = await prisma.transaction.findFirst({
       where: whereBy,
-      select: { id: true, status: true, supplierId: true, supplierPrice: true, serial: true },
+      select: {
+        id: true,
+        status: true,
+        supplierId: true,
+        supplierPrice: true,
+        serial: true,
+        product: true,
+        msisdn: true,
+      },
     });
 
     if (!trx) {
       // fallback: coba match by id
       trx = await prisma.transaction.findFirst({
         where: { id: String(ref), supplierId: supplier.id },
-        select: { id: true, status: true, supplierId: true, supplierPrice: true, serial: true },
+        select: {
+          id: true,
+          status: true,
+          supplierId: true,
+          supplierPrice: true,
+          serial: true,
+          msisdn: true,
+        },
       });
-      if (!trx) return res.json({ ok: true, skip: "trx not found for this supplier" });
+      if (!trx)
+        return res.json({ ok: true, skip: "trx not found for this supplier" });
     }
 
     // 5) Normalisasi status + ekstrak Serial Number
@@ -176,7 +251,10 @@ export async function supplierCallbackUniversal(req, res) {
     if (cfg.serialFields && cfg.serialFields.length) {
       for (const p of cfg.serialFields) {
         const v = pick(req.body || {}, p, null);
-        if (v != null) { serial = String(v); break; }
+        if (v != null) {
+          serial = String(v);
+          break;
+        }
       }
     }
 
@@ -190,7 +268,9 @@ export async function supplierCallbackUniversal(req, res) {
 
     // c) heuristik ringan dari message (SN: XXX / SERIAL: XXX / VOUCHER: XXX)
     if (!serial && typeof msg === "string") {
-      const m = msg.match(/(?:\bSN\b|\bSERIAL\b|\bVOUCHER\b)\s*[:=\-]?\s*([A-Za-z0-9\-]+)/i);
+      const m = msg.match(
+        /(?:\bSN\b|\bSERIAL\b|\bVOUCHER\b)\s*[:=\-]?\s*([A-Za-z0-9\-]+)/i
+      );
       if (m && m[1]) serial = m[1];
     }
 
@@ -223,7 +303,10 @@ export async function supplierCallbackUniversal(req, res) {
 
       // Patch awal (supplierPrice + serial) — tidak menimpa serial jika sudah ada
       const patch = {};
-      if (supplierPrice != null && supplierPrice !== Number(current.supplierPrice || 0)) {
+      if (
+        supplierPrice != null &&
+        supplierPrice !== Number(current.supplierPrice || 0)
+      ) {
         patch.supplierPrice = BigInt(supplierPrice);
       }
       if (serial && !current.serial) {
@@ -234,11 +317,35 @@ export async function supplierCallbackUniversal(req, res) {
       }
 
       if (S === "SUCCESS") {
-        await finalizeSuccess(current.id, { message: msg, supplierResult, tx });
+        // console.log(S)
+        await finalizeSuccessTx(tx, current.id, {
+          message: msg,
+          supplierResult,
+        });
+        // Realtime
+        emitTrxUpdate(req.app.locals.trxNsp, {
+          id: trx.id,
+          invoiceId: trx.invoiceId,
+          resellerId: trx.resellerId,
+          productCode: trx.product?.code ?? null,
+          msisdn: trx.msisdn,
+          amount: Number(priceRaw ?? 0),
+          status: "SUCCESS",
+          supplierName: supplier.name,
+          message: msg,
+          createdAt: trx.createdAt,
+        });
+
+        await awardPointsForSuccess(trx.id);
+
         return { done: true, state: "SUCCESS" };
+        // await finalizeSuccess(current.id, { message: msg, supplierResult, tx });
+        // return { done: true, state: "SUCCESS" };
       }
 
       if (["FAILED", "CANCELED", "EXPIRED"].includes(S)) {
+        //        await finalizeFailed(current.id, { message: msg, supplierResult, tx });
+        // return { done: true, state: S };
         await finalizeFailed(current.id, { message: msg, supplierResult, tx });
         return { done: true, state: S };
       }
@@ -250,7 +357,9 @@ export async function supplierCallbackUniversal(req, res) {
           status: "PROCESSING",
           message: msg,
           supplierResult,
-          ...(supplierPrice != null ? { supplierPrice: BigInt(supplierPrice) } : {}),
+          ...(supplierPrice != null
+            ? { supplierPrice: BigInt(supplierPrice) }
+            : {}),
           ...(serial && !current.serial ? { serial: String(serial) } : {}),
         },
       });
@@ -258,7 +367,11 @@ export async function supplierCallbackUniversal(req, res) {
     });
 
     if (!acted.done) {
-      return res.json({ ok: true, skip: acted.reason || "no-op", state: acted.state || null });
+      return res.json({
+        ok: true,
+        skip: acted.reason || "no-op",
+        state: acted.state || null,
+      });
     }
     return res.json({ ok: true, state: acted.state, supplier: supplier.code });
   } catch (e) {

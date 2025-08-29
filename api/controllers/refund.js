@@ -2,7 +2,7 @@
 import prisma from "../prisma.js";
 import { emitTrxUpdate } from "../lib/realtime.js";
 import { reverseCommissionFromWallet } from "../lib/commission-wallet.js"; // ⬅️ gunakan wallet
-
+import { reversePointsOnRefund } from "../lib/points.service.js";
 export async function refundTransaction(req, res) {
   try {
     const { id } = req.params;
@@ -25,6 +25,7 @@ export async function refundTransaction(req, res) {
     if (!trx) return res.status(404).json({ error: "Transaksi tidak ditemukan" });
 
     if (trx.status === "REFUNDED") {
+       
       return res.status(409).json({ error: "Transaksi sudah direfund" });
     }
 
@@ -92,6 +93,9 @@ export async function refundTransaction(req, res) {
       const isFullRefund = refundAmount === totalPaid;
 
       if (isFullRefund) {
+
+        // refund point transaksi
+        await reversePointsOnRefund(trx.id)
         // Full: reverse seluruh komisi yg belum di-offset untuk trx ini
         await reverseCommissionFromWallet(trx.id, null, { allowNegative: true });
       } else if (rawCommReverse != null) {

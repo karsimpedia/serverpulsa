@@ -2,8 +2,7 @@
 import express from 'express';
 
 // Auth & middleware
-import { loginAdmin } from '../controllers/auth.js';
-import { authAdmin } from '../middleware/authAdmin.js';
+
 import { refundTransaction } from "../controllers/refund.js";
 // Admin ops lain
 import { topupSaldoManual } from '../controllers/saldo.js';
@@ -60,7 +59,7 @@ const router = express.Router();
  * - Login admin: no auth
  * - Semua route lain: dilindungi authAdmin
  */
-router.post('/login', loginAdmin);
+
 
 // ===== Reseller/Saldo/Admin tools =====
 router.post('/saldo/topup',  topupSaldoManual);

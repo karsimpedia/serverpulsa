@@ -108,3 +108,55 @@ export async function getTransactionByInvoice(req, res) {
     return res.status(500).json({ error: "Gagal mengambil detail transaksi." });
   }
 }
+function toPlain(obj) {
+  return JSON.parse(
+    JSON.stringify(obj, (_, v) => (typeof v === "bigint" ? v.toString() : v))
+  );
+}
+
+
+
+// get transaksi reseller detail by id
+
+// Jika nanti kamu butuh menambahkan field lain 
+// (mis. adminFee, externalRefId, atau riwayat status), 
+// tinggal tambah di bagian select: yang sama—toPlain akan tetap menangani BigInt-nya.
+export async function getTransactionDetail(req, res) {
+  try {
+    const resellerId = req.user?.resellerId;
+    if (!resellerId) {
+      return res.status(401).json({ error: "Unauthorized (resellerId tidak ada)" });
+    }
+
+    const idOrInvoice = String(req.params.idOrInvoice || "").trim();
+    if (!idOrInvoice) {
+      return res.status(400).json({ error: "Param idOrInvoice wajib" });
+    }
+
+    // Cari transaksi milik reseller ini saja
+    const trx = await prisma.transaction.findFirst({
+      where: {
+        resellerId,
+        OR: [{ id: idOrInvoice }, { invoiceId: idOrInvoice }],
+      },
+      select: {
+        id: true,
+        invoiceId: true,
+        msisdn: true,
+        status: true,
+        sellPrice: true,      // BigInt → diubah ke string oleh toPlain()
+        createdAt: true,
+        product: { select: { code: true, name: true, nominal: true } },
+      },
+    });
+
+    if (!trx) {
+      return res.status(404).json({ error: "Transaksi tidak ditemukan" });
+    }
+
+    return res.json(toPlain(trx));
+  } catch (err) {
+    console.error("getTransactionDetail error:", err);
+    return res.status(500).json({ error: "Gagal memuat detail transaksi" });
+  }
+}

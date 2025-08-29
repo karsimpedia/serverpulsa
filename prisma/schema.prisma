@@ -72,6 +72,12 @@ enum CommissionBase {
   MARGIN
 }
 
+enum RedeemStatus {
+  PENDING // request masuk, belum diproses admin
+  APPROVED // disetujui admin → bisa dikreditkan reward
+  REJECTED // ditolak
+}
+
 // ========== Core Models ==========
 model User {
   id        String   @id @default(uuid())
@@ -121,6 +127,9 @@ model Reseller {
 
   devices              Device[]
   ResellerGlobalMarkup ResellerGlobalMarkup[]
+  points               ResellerPoint?
+  pointRedemptions     PointRedemption[]
+  transactionPoints    TransactionPoint[]
 
   @@index([parentId])
 }
@@ -177,50 +186,81 @@ model MutasiSaldo {
 }
 
 model ProductCategory {
-  id          String    @id @default(uuid())
-  name        String    @unique
-  code        String?   @unique
+  id          String                  @id @default(uuid())
+  name        String                  @unique
+  code        String?                 @unique
   products    Product[]
   description String?
-  prefixes    ProductCategoryPrefix[]  
-  createdAt   DateTime  @default(now())
+  prefixes    ProductCategoryPrefix[]
+  createdAt   DateTime                @default(now())
 }
 
 model ProductCategoryPrefix {
-  id          String          @id @default(uuid())
-  categoryId  String
-  category    ProductCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  id         String          @id @default(uuid())
+  categoryId String
+  category   ProductCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
 
-  prefix      String          // contoh: "0817"
-  length      Int             @default(4)
+  prefix String // contoh: "0817"
+  length Int    @default(4)
 
-  createdAt   DateTime        @default(now())
+  createdAt DateTime @default(now())
 
-  @@index([prefix])
   @@unique([categoryId, prefix]) // prefix unik per kategori
+  @@index([prefix])
 }
 
+model TransactionPoint {
+  id            String   @id @default(uuid())
+  transactionId String   @unique
+  resellerId    String
+  productId     String
+  points        Int // poin yang sempat diberikan
+  createdAt     DateTime @default(now())
 
+  transaction Transaction @relation(fields: [transactionId], references: [id])
+  reseller    Reseller    @relation(fields: [resellerId], references: [id])
+  product     Product     @relation(fields: [productId], references: [id])
+}
+
+model ResellerPoint {
+  resellerId String @id
+  balance    Int    @default(0) // total poin saat ini
+
+  reseller Reseller @relation(fields: [resellerId], references: [id])
+}
+
+model PointRedemption {
+  id          String       @id @default(uuid())
+  resellerId  String
+  points      Int
+  description String? // misal: "Tukar pulsa 10rb", "Voucher", dsb
+  status      RedeemStatus @default(PENDING)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  reseller Reseller @relation(fields: [resellerId], references: [id])
+}
 
 model Product {
-  id        String      @id @default(uuid())
-  code      String      @unique
-  name      String
-  type      ProductType
-  nominal   Int?
-  basePrice BigInt
-  margin    BigInt      @default(0)
-  isActive  Boolean     @default(true)
-  createdAt DateTime    @default(now())
-
-  supplierProducts SupplierProduct[]
-  resellerPrices   ResellerPrice[]
-  commissionRules  CommissionRule[]
-  Transaction      Transaction[]
-  CommissionFlat   CommissionFlat[]
-  categoryId       String?
-  category         ProductCategory?  @relation(fields: [categoryId], references: [id])
-  resellerMarkups  ResellerMarkup[]
+  id                String             @id @default(uuid())
+  code              String             @unique
+  name              String
+  type              ProductType
+  nominal           Int?
+  basePrice         BigInt
+  margin            BigInt             @default(0)
+  isActive          Boolean            @default(true)
+  createdAt         DateTime           @default(now())
+  pointValue        Int                @default(0)
+  supplierProducts  SupplierProduct[]
+  resellerPrices    ResellerPrice[]
+  commissionRules   CommissionRule[]
+  Transaction       Transaction[]
+  CommissionFlat    CommissionFlat[]
+  categoryId        String?
+  category          ProductCategory?   @relation(fields: [categoryId], references: [id])
+  resellerMarkups   ResellerMarkup[]
+  transactionPoints TransactionPoint[]
 }
 
 model SupplierConfig {
@@ -297,47 +337,47 @@ model ResellerCallback {
 }
 
 model Transaction {
-  id              String            @id @default(uuid())
-  invoiceId       String            @unique
-  resellerId      String
-  productId       String
-  msisdn          String
-  type            TransactionType   @default(TOPUP)
-  sellPrice       BigInt
-  supplierPrice   BigInt            @default(0)
-  adminFee        BigInt            @default(0)
-  status          TransactionStatus @default(PENDING)
-  supplierId      String?
-  supplierRef     String?  
-  supplierPayload Json?
-  supplierResult  Json?
-  callbackSentAt  DateTime?
-  createdAt       DateTime          @default(now())
-  updatedAt       DateTime          @updatedAt
-  expiresAt       DateTime?
-  externalRefId   String?
-  message         String?
-  serial          String?  
-  reseller Reseller @relation(fields: [resellerId], references: [id])
-  product  Product  @relation(fields: [productId], references: [id])
-
+  id                  String                  @id @default(uuid())
+  invoiceId           String                  @unique
+  resellerId          String
+  productId           String
+  msisdn              String
+  type                TransactionType         @default(TOPUP)
+  sellPrice           BigInt
+  supplierPrice       BigInt                  @default(0)
+  adminFee            BigInt                  @default(0)
+  status              TransactionStatus       @default(PENDING)
+  supplierId          String?
+  supplierRef         String?
+  supplierPayload     Json?
+  supplierResult      Json?
+  callbackSentAt      DateTime?
+  createdAt           DateTime                @default(now())
+  updatedAt           DateTime                @updatedAt
+  expiresAt           DateTime?
+  externalRefId       String?
+  message             String?
+  serial              String?
+  reseller            Reseller                @relation(fields: [resellerId], references: [id])
+  product             Product                 @relation(fields: [productId], references: [id])
+  pointRecord         TransactionPoint?
+  pointGiven          Int                     @default(0) // berapa poin yang seharusnya diberikan untuk transaksi ini
+  pointAwarded        Boolean                 @default(false) // sudah dikreditkan?
+  pointReversed       Boolean                 @default(false) // sudah direfund
   commissions         TransactionCommission[]
-  // --- Wallet komisi (back-relation) ---
   commissionMutations CommissionMutation[]    @relation("TransactionCommissionMutations")
 
   @@unique([resellerId, externalRefId])
   @@index([resellerId, productId, msisdn, createdAt])
 }
 
-// ========== Pricing by MARKUP (baru, dipakai) ==========
 model ResellerMarkup {
-  id         String @id @default(uuid())
+  id         String   @id @default(uuid())
   resellerId String
   productId  String
-  markup     BigInt @default(0)
-
-  reseller Reseller @relation(fields: [resellerId], references: [id])
-  product  Product  @relation(fields: [productId], references: [id])
+  markup     BigInt   @default(0)
+  reseller   Reseller @relation(fields: [resellerId], references: [id])
+  product    Product  @relation(fields: [productId], references: [id])
 
   @@unique([resellerId, productId])
 }
@@ -349,16 +389,14 @@ model ResellerGlobalMarkup {
   reseller Reseller @relation(fields: [resellerId], references: [id])
 }
 
-// ========== (Opsional) Sistem Komisi Tambahan ==========
 model CommissionPlan {
-  id        String         @id @default(uuid())
-  name      String
-  isActive  Boolean        @default(true)
-  base      CommissionBase @default(MARGIN)
-  maxLevels Int            @default(3)
-  createdAt DateTime       @default(now())
-  updatedAt DateTime       @updatedAt
-
+  id          String                     @id @default(uuid())
+  name        String
+  isActive    Boolean                    @default(true)
+  base        CommissionBase             @default(MARGIN)
+  maxLevels   Int                        @default(3)
+  createdAt   DateTime                   @default(now())
+  updatedAt   DateTime                   @updatedAt
   rules       CommissionRule[]
   assignments CommissionPlanAssignment[]
 }
@@ -388,29 +426,26 @@ model CommissionPlanAssignment {
 
 // Ledger payout komisi per transaksi
 model TransactionCommission {
-  id            String   @id @default(uuid())
+  id            String      @id @default(uuid())
   transactionId String
   resellerId    String
   level         Int
   amount        BigInt
-  createdAt     DateTime @default(now())
-
-  transaction Transaction @relation(fields: [transactionId], references: [id])
-  reseller    Reseller    @relation(fields: [resellerId], references: [id])
+  createdAt     DateTime    @default(now())
+  transaction   Transaction @relation(fields: [transactionId], references: [id])
+  reseller      Reseller    @relation(fields: [resellerId], references: [id])
 
   @@unique([transactionId, resellerId, level])
   @@index([transactionId])
 }
 
-// DEPRECATED: tidak dipakai lagi
 model ResellerPrice {
-  id         String @id @default(uuid())
+  id         String   @id @default(uuid())
   resellerId String
   productId  String
   sellPrice  BigInt
-
-  reseller Reseller @relation(fields: [resellerId], references: [id])
-  product  Product  @relation(fields: [productId], references: [id])
+  reseller   Reseller @relation(fields: [resellerId], references: [id])
+  product    Product  @relation(fields: [productId], references: [id])
 
   @@unique([resellerId, productId])
 }
