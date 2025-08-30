@@ -107,7 +107,7 @@ export async function getMutasi(req, res) {
 
 export async function getMutasibyReseller(req, res) {
 
-  const id = req.user.id
+  const id = req.user.resellerId
   try {
     const take = Number(req.query.take || 20);
     const skip = Number(req.query.skip || 0);
@@ -120,6 +120,8 @@ export async function getMutasibyReseller(req, res) {
     res.json(
       rows.map((r) => ({
         ...r,
+        afterAmount: Number(r.afterAmount),
+        beforeAmount: Number(r.beforeAmount),
         amount: Number(r.amount),
       }))
     );

@@ -374,13 +374,13 @@ export async function createProduct(req, res) {
 export async function setProductPoint(req, res) {
   try {
     const { productId } = req.params;
-    let { pointValue } = req.body || {};
-    pointValue = Number.isFinite(pointValue) ? Math.max(0, Math.floor(pointValue)) : 0;
+    const n = Number(req.body?.pointValue);
+    const pointValue = Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
 
     const updated = await prisma.product.update({
       where: { id: productId },
       data: { pointValue },
-      select: { id: true, code: true, name: true, pointValue: true },
+      select: { id: true, code: true, name: true, pointValue: true }
     });
 
     return res.json({ ok: true, product: updated });
@@ -389,92 +389,277 @@ export async function setProductPoint(req, res) {
   }
 }
 
+// ===== Utils umum (pakai yang kamu sudah punya kalau ada) =====
+function toBool(v, dflt = true) {
+  if (typeof v === "boolean") return v;
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    if (["true", "1", "yes", "y"].includes(s)) return true;
+    if (["false", "0", "no", "n"].includes(s)) return false;
+  }
+  return dflt;
+}
+function toIntOrNull(v) {
+  if (v === undefined || v === null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+}
+function toNonNegIntOr(v, fallback = 0) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.trunc(n));
+}
+function toBigIntStrict(v, fieldName = "value") {
+  const num = Number(v);
+  if (!Number.isFinite(num)) throw new Error(`${fieldName} harus angka.`);
+  return BigInt(Math.trunc(num));
+}
+function serializeProduct(p) {
+  return {
+    ...p,
+    basePrice: p.basePrice?.toString?.(),
+    margin: p.margin?.toString?.(),
+  };
+}
+
+// ====== CODE GENERATOR untuk kategori ======
+
+// Buat basis code dari nama: ambil inisial kata → kalau kependekan,
+// fallback ke potongan huruf/angka dari nama.
+// Hasil di-UPPERCASE dan dipangkas 3..8 karakter.
+function makeCategoryCodeBase(name) {
+  const cleaned = String(name || "").trim();
+  const words = cleaned
+    .replace(/[^A-Za-z0-9\s]+/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+
+  let base = "";
+  if (words.length >= 2) {
+    base = words.map(w => w[0]).join(""); // inisial tiap kata
+  } else {
+    base = cleaned.replace(/[^A-Za-z0-9]+/g, ""); // buang non-alnum
+  }
+
+  if (!base) base = "CAT"; // fallback
+  base = base.toUpperCase();
+
+  // panjang ideal 3..8
+  if (base.length < 3) base = (base + "XYZ").slice(0, 3);
+  if (base.length > 8) base = base.slice(0, 8);
+
+  return base;
+}
+
+// Pastikan code unik di tabel ProductCategory.code (unique, nullable).
+// Coba base, kalau sudah dipakai → base2, base3, ...
+async function generateUniqueCategoryCode(tx, base) {
+  let attempt = base;
+  let suffix = 1;
+
+  // Cari sampai tidak ada yang pakai code yang sama
+  // (Gunakan findUnique by code karena schema kamu: `code String? @unique`)
+  // Note: karena `code` nullable, hanya cek saat attempt != null
+  // Loop aman karena jumlah kategori biasanya tidak ekstrem.
+  /* eslint-disable no-await-in-loop */
+  while (true) {
+    const exists = await tx.productCategory.findUnique({
+      where: { code: attempt },
+      select: { id: true },
+    });
+    if (!exists) return attempt;
+    suffix += 1;
+    attempt = `${base}${suffix}`;
+    // jaga panjang maksimal 12 agar rapi
+    if (attempt.length > 12) {
+      const cut = Math.max(3, 12 - String(suffix).length);
+      attempt = `${base.slice(0, cut)}${suffix}`;
+    }
+  }
+  /* eslint-enable no-await-in-loop */
+}
+
+// Temukan/buat kategori berdasar nama:
+// - Kalau ada: kembalikan, dan set code jika masih null.
+// - Kalau tidak: buat baru dengan code unik otomatis.
+async function ensureCategoryByName(tx, rawName) {
+  const name = String(rawName || "").trim().toUpperCase();
+  if (!name) return null;
+
+  // Cari by name (unique)
+  let cat = await tx.productCategory.findUnique({
+    where: { name },
+    select: { id: true, name: true, code: true },
+  });
+
+  if (cat) {
+    // Jika belum punya code, generate dan update
+    if (!cat.code) {
+      const base = makeCategoryCodeBase(name);
+      const uniqueCode = await generateUniqueCategoryCode(tx, base);
+      cat = await tx.productCategory.update({
+        where: { id: cat.id },
+        data: { code: uniqueCode },
+        select: { id: true, name: true, code: true },
+      });
+    }
+    return cat;
+  }
+
+  // Tidak ada → buat baru dengan code unik
+  const base = makeCategoryCodeBase(name);
+  const uniqueCode = await generateUniqueCategoryCode(tx, base);
+  cat = await tx.productCategory.create({
+    data: { name, code: uniqueCode },
+    select: { id: true, name: true, code: true },
+  });
+  return cat;
+}
+
+// ====== Handler utama ======
 export async function upsertProduct(req, res) {
   try {
-    let { 
-      code, 
-      name, 
-      type, 
-      nominal, 
-      basePrice, 
-      margin, 
-      isActive, 
-      categoryId, 
+    let {
+      code,
+      name,
+      type,
+      nominal,
+      basePrice,
+      margin,
+      isActive,
+      categoryId,
       categoryName,
-      pointValue   // ⬅️ ambil dari body
-    } = req.body;
+      pointValue,
+    } = req.body || {};
 
+    // Validasi dasar
     if (!code || !name || !type || basePrice == null) {
-      return res.status(400).json({ error: "Field wajib: code,name,type,basePrice" });
+      return res
+        .status(400)
+        .json({ error: "Field wajib: code, name, type, basePrice" });
     }
 
+    // Normalisasi
     code = String(code).trim().toUpperCase();
+    name = String(name).trim();
+    type = String(type).trim().toUpperCase();
     const allowedTypes = ["PULSA", "TAGIHAN"];
     if (!allowedTypes.includes(type)) {
       return res.status(400).json({ error: "type harus PULSA atau TAGIHAN" });
     }
 
-    // Normalisasi pointValue
-    pointValue = Number.isFinite(pointValue) ? Math.max(0, Math.floor(pointValue)) : 0;
+    const nominalInt = toIntOrNull(nominal);
+    const basePriceBI = toBigIntStrict(basePrice, "basePrice");
+    const marginBI = margin == null ? 0n : toBigIntStrict(margin, "margin");
+    const isActiveBool = toBool(isActive, true);
+    const pointValueInt = toNonNegIntOr(pointValue, 0);
 
-    // Kalau user kirim categoryName → buat/upsert kategori
-    if (!categoryId && categoryName) {
-      const cat = await prisma.productCategory.upsert({
-        where: { name: categoryName.trim().toUpperCase() },
-        update: {},
-        create: { name: categoryName.trim().toUpperCase() },
+    // Jalankan dalam transaksi agar kategori & produk konsisten
+    const result = await prisma.$transaction(async (tx) => {
+      // Jika categoryName diberikan & categoryId kosong → pastikan kategori ada
+      if (!categoryId && categoryName) {
+        const cat = await ensureCategoryByName(tx, categoryName);
+        categoryId = cat?.id || null;
+      }
+
+      // Upsert produk by code (unique)
+      const prod = await tx.product.upsert({
+        where: { code },
+        update: {
+          name,
+          type,
+          nominal: nominalInt,
+          basePrice: basePriceBI,
+          margin: marginBI,
+          isActive: isActiveBool,
+          categoryId: categoryId || null,
+          pointValue: pointValueInt,
+        },
+        create: {
+          code,
+          name,
+          type,
+          nominal: nominalInt,
+          basePrice: basePriceBI,
+          margin: marginBI,
+          isActive: isActiveBool,
+          categoryId: categoryId || null,
+          pointValue: pointValueInt,
+        },
+        select: {
+          id: true,
+          code: true,
+          name: true,
+          type: true,
+          nominal: true,
+          basePrice: true,
+          margin: true,
+          isActive: true,
+          pointValue: true,
+          category: { select: { id: true, name: true, code: true } },
+        },
       });
-      categoryId = cat.id;
-    }
 
-    const prod = await prisma.product.upsert({
-      where: { code },
-      update: {
-        name,
-        type,
-        nominal: nominal ?? null,
-        basePrice: BigInt(basePrice),
-        margin: BigInt(margin ?? 0),
-        isActive: isActive ?? true,
-        categoryId: categoryId || null,
-        pointValue,   // ⬅️ update
-      },
-      create: {
-        code,
-        name,
-        type,
-        nominal: nominal ?? null,
-        basePrice: BigInt(basePrice),
-        margin: BigInt(margin ?? 0),
-        isActive: isActive ?? true,
-        categoryId: categoryId || null,
-        pointValue,   // ⬅️ create
-      },
-      include: { category: true },
+      return prod;
     });
 
-    return res.status(200).json({ data: prod });
+    return res.status(200).json({ ok: true, data: serializeProduct(result) });
   } catch (e) {
     console.error("Upsert produk gagal:", e);
-    return res.status(500).json({ error: "Upsert produk gagal" });
+    if (e?.code === "P2002" && e?.meta?.target?.includes("code")) {
+      return res
+        .status(409)
+        .json({ error: `Produk dengan code '${req.body?.code}' sudah ada.` });
+    }
+    return res.status(500).json({ error: e?.message || "Upsert produk gagal" });
   }
 }
 
 
-
-// Get all products
+// Get all products (search + single/multi type + optional group by category)
 export async function getAllProducts(req, res) {
   try {
     const includeParam = String(req.query.include || "");
     const includeCategory = includeParam
       .split(",")
-      .map(s => s.trim().toLowerCase())
+      .map((s) => s.trim().toLowerCase())
       .includes("category");
 
     const groupBy = String(req.query.group || "").toLowerCase();
     const groupByCategory = groupBy === "category";
 
+    // === filters ===
+    const q = req.query.q ? String(req.query.q).trim() : null;
+
+    // type bisa single: "PULSA" atau multi: "PULSA,TAGIHAN"
+    const rawType = req.query.type ? String(req.query.type) : null;
+    const types = rawType
+      ? Array.from(
+          new Set(
+            rawTypeW
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean)
+              .map((s) => s.toUpperCase())
+          )
+        )
+      : null;
+
+    const where = {};
+    if (q) {
+      where.OR = [
+        { name: { contains: q, mode: "insensitive" } },
+        { code: { contains: q, mode: "insensitive" } },
+        { description: { contains: q, mode: "insensitive" } }, // jika field ada
+      ];
+    }
+
+    if (types?.length) {
+      where.type = types.length === 1 ? types[0] : { in: types };
+    }
+
     const products = await prisma.product.findMany({
+      where,
       orderBy: { createdAt: "desc" },
       include: includeCategory
         ? { category: { select: { id: true, code: true, name: true } } }
@@ -507,7 +692,7 @@ export async function getAllProducts(req, res) {
 
     // default: list flat
     return res.json({
-      data: products.map(p => toPlainProduct(p, { includeCategory })),
+      data: products.map((p) => toPlainProduct(p, { includeCategory })),
     });
   } catch (err) {
     console.error("Fetch products error:", err);
@@ -516,6 +701,32 @@ export async function getAllProducts(req, res) {
 }
 
 
+
+// Get single product by CODE
+export async function getProductByCode(req, res) {
+  try {
+    const { code } = req.params;
+    if (!code) {
+      return res.status(400).json({ error: "Kode produk wajib." });
+    }
+
+    const product = await prisma.product.findUnique({
+      where: { code: String(code).trim().toUpperCase() },
+      include: {
+        category: { select: { id: true, name: true, code: true } }
+      }
+    });
+
+    if (!product) {
+      return res.status(404).json({ error: "Produk tidak ditemukan." });
+    }
+
+    return res.json({ data: toPlainProduct(product) });
+  } catch (err) {
+    console.error("Fetch product by code error:", err);
+    return res.status(500).json({ error: "Terjadi kesalahan pada server." });
+  }
+}
 
 
 // Get single product by ID

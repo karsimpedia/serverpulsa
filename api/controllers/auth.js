@@ -104,22 +104,72 @@ export async function loginAdmin(req, res) {
 }
 export async function me(req, res) {
   try {
-    // req.user dari middleware
     const { id, resellerId } = req.user || {};
     if (!id) return res.status(401).json({ error: "Unauthorized" });
 
-    const [user, reseller, saldo] = await Promise.all([
-      prisma.user.findUnique({ where: { id }, select: { id: true, username: true, role: true, createdAt: true } }),
-      prisma.reseller.findUnique({ where: { id: resellerId }, select: { id: true, name: true, referralCode: true, isActive: true } }),
-      prisma.saldo?.findUnique?.({ where: { resellerId }, select: { amount: true } }).catch(() => null),
+    const [
+      user,
+      reseller,
+      saldo,
+      // --- POINS ---
+      resellerPoint,                          // saldo poin saat ini
+      earnedAgg,                              // total poin yang pernah diberikan
+      redeemedAgg,                            // total poin yang pernah ditebus (APPROVED)
+      pendingRedeemAgg                        // total poin yang sedang diajukan (PENDING)
+    ] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id },
+        select: { id: true, username: true, role: true, createdAt: true }
+      }),
+      prisma.reseller.findUnique({
+        where: { id: resellerId },
+        select: { id: true, name: true, referralCode: true, isActive: true }
+      }),
+      prisma.saldo?.findUnique?.({
+        where: { resellerId },
+        select: { amount: true }
+      }).catch(() => null),
+
+      prisma.resellerPoint.findUnique({
+        where: { resellerId },
+        select: { balance: true }
+      }),
+
+      prisma.transactionPoint.aggregate({
+        where: { resellerId },
+        _sum: { points: true }
+      }),
+
+      prisma.pointRedemption.aggregate({
+        where: { resellerId, status: "APPROVED" }, // atau RedeemStatus.APPROVED
+        _sum: { points: true }
+      }),
+
+      prisma.pointRedemption.aggregate({
+        where: { resellerId, status: "PENDING" },  // atau RedeemStatus.PENDING
+        _sum: { points: true }
+      })
     ]);
 
-    return res.json({ user, reseller, saldo: saldo || { amount: 0 } });
+    const points = {
+      balance: resellerPoint?.balance ?? 0,
+      earnedTotal: earnedAgg?._sum?.points ?? 0,
+      redeemedTotal: redeemedAgg?._sum?.points ?? 0,
+      pendingRedeem: pendingRedeemAgg?._sum?.points ?? 0
+    };
+
+    return res.json({
+      user,
+      reseller,
+      saldo: saldo || { amount: 0n }, // tetap bigInt sesuai skema kamu
+      points
+    });
   } catch (e) {
     console.error("me:", e);
     return res.status(500).json({ error: "Gagal mengambil profil." });
   }
 }
+
 
 export async function logout(req, res) {
   try {

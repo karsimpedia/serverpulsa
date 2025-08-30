@@ -7,7 +7,7 @@ import {
   getCategoryProducts,
   deleteCategory,
   listCategoriesByPrefix,
-
+updateCategoryById,
   listCategoryPrefixes,
   bulkAddCategoryPrefixes,
   replaceCategoryPrefixes,
@@ -17,7 +17,8 @@ import {
 const router = Router();
 
 // kategori
-router.post("/", upsertCategory);          // create/update by name
+router.post("/", upsertCategory);  // create/update by name
+router.patch("/:id", updateCategoryById);   //update category by id      
 router.get("/", listCategories);           // list kategori (dengan total produk)
 router.get("/byid/:id", getCategoryById);       // detail kategori
 router.get("/:id/products", getCategoryProducts); // list produk per kategori

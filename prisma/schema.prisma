@@ -246,6 +246,7 @@ model Product {
   code              String             @unique
   name              String
   type              ProductType
+  description       String            @default("")          
   nominal           Int?
   basePrice         BigInt
   margin            BigInt             @default(0)

@@ -168,6 +168,157 @@ export async function bulkMoveProducts(req, res) {
 }
 
 
+export async function updateCategoryById(req, res) {
+
+  console.log( req.body)
+  try {
+    const { id } = req.params;
+    let { name, code, description, prefix, prefixes } = req.body || {};
+
+    if (!id) return res.status(400).json({ error: "Param id wajib." });
+
+    // normalisasi
+    const norm = (v) => (v == null ? null : String(v).trim());
+    name = norm(name)?.toUpperCase() ?? null;        // boleh null = tidak diubah
+    code = norm(code)?.toUpperCase() ?? null;        // boleh null = set null/tidak diubah (lihat di bawah)
+    description = norm(description);                 // boleh null
+
+    // ambil raw prefix dari prefix/prefixes
+    const raw = prefixes ?? prefix ?? [];
+
+    // parser prefix -> array { prefix, length }
+    const toDigits = (s) => String(s || "").replace(/[^\d]/g, "");
+    function parseRawPrefixes(input) {
+      let arr = [];
+      if (typeof input === "string") {
+        arr = input.split(/[,\n;]+/).map((s) => s.trim()).filter(Boolean);
+      } else if (Array.isArray(input)) {
+        arr = input;
+      } else if (input) {
+        arr = [input];
+      }
+      const out = [];
+      for (const it of arr) {
+        if (typeof it === "string") {
+          const p = toDigits(it);
+          if (p) out.push({ prefix: p, length: p.length });
+        } else if (it && typeof it === "object") {
+          const p = toDigits(it.prefix);
+          if (p) {
+            let len = Number(it.length ?? p.length);
+            if (!Number.isFinite(len) || len <= 0) len = p.length;
+            if (len > 32) len = 32;
+            out.push({ prefix: p, length: len });
+          }
+        }
+      }
+      // dedup by prefix (ambil yang terakhir)
+      const map = new Map();
+      for (const r of out) map.set(r.prefix, r);
+      return Array.from(map.values());
+    }
+    const desired = parseRawPrefixes(raw);
+
+    const result = await prisma.$transaction(async (tx) => {
+      // pastikan kategori ada
+      const existing = await tx.productCategory.findUnique({
+        where: { id },
+        select: { id: true, name: true, code: true },
+      });
+      if (!existing) {
+        throw Object.assign(new Error("NOT_FOUND"), { code: "NOT_FOUND" });
+      }
+
+      // jika user ingin set code (termasuk dari null -> isi baru), cek konflik
+      if (code !== null) {
+        // code boleh kosong string? treat sebagai null
+        const codeVal = code === "" ? null : code;
+        if (codeVal) {
+          const conflict = await tx.productCategory.findUnique({
+            where: { code: codeVal },
+            select: { id: true },
+          });
+          if (conflict && conflict.id !== id) {
+            throw Object.assign(new Error("CODE_CONFLICT"), { code: "CODE_CONFLICT" });
+          }
+        }
+      }
+
+      // susun payload update (hanya field yang dikirim non-undefined yang diupdate)
+      const data = {};
+      if (name !== null) data.name = name;
+      if (description !== undefined) data.description = description; // boleh null untuk hapus
+      if (code !== null) data.code = code === "" ? null : code;
+
+      // update kategori utama
+      const category = await tx.productCategory.update({
+        where: { id },
+        data,
+        select: { id: true, name: true, code: true, description: true },
+      });
+
+      // sinkronisasi prefix (hanya jika user kirim sesuatu untuk prefix)
+      let prefixesFinal = [];
+      if (raw !== undefined) {
+        const existingPrefixes = await tx.productCategoryPrefix.findMany({
+          where: { categoryId: id },
+          select: { id: true, prefix: true },
+        });
+
+        const desiredSet = new Set(desired.map((d) => d.prefix));
+        const idsToDelete = existingPrefixes
+          .filter((e) => !desiredSet.has(e.prefix))
+          .map((e) => e.id);
+
+        if (idsToDelete.length) {
+          await tx.productCategoryPrefix.deleteMany({
+            where: { id: { in: idsToDelete } },
+          });
+        }
+
+        for (const d of desired) {
+          await tx.productCategoryPrefix.upsert({
+            where: { categoryId_prefix: { categoryId: id, prefix: d.prefix } },
+            update: { length: d.length },
+            create: { categoryId: id, prefix: d.prefix, length: d.length },
+          });
+        }
+      }
+
+      prefixesFinal = await tx.productCategoryPrefix.findMany({
+        where: { categoryId: id },
+        orderBy: { prefix: "asc" },
+      });
+
+      return { category, prefixes: prefixesFinal };
+    });
+
+    return res.json({ data: result });
+  } catch (e) {
+    console.log(e)
+    if (e?.code === "NOT_FOUND") {
+      return res.status(404).json({ error: "Kategori tidak ditemukan." });
+    }
+    if (e?.code === "CODE_CONFLICT") {
+      return res.status(409).json({ error: "Kode kategori sudah digunakan oleh kategori lain." });
+    }
+    if (e && e.code === "P2002") {
+      const tgt = Array.isArray(e.meta?.target) ? e.meta.target.join(",") : e.meta?.target;
+      if (tgt?.includes("name")) {
+        return res.status(409).json({ error: "Nama kategori sudah digunakan." });
+      }
+      if (tgt?.includes("categoryId_prefix")) {
+        return res.status(409).json({ error: "Prefix sudah ada pada kategori ini." });
+      }
+    }
+    console.error("updateCategoryById error:", e);
+    return res.status(500).json({ error: "Gagal update kategori." });
+  }
+}
+
+
+
+
 export async function upsertCategory(req, res) {
   try {
     let { name, code, description, prefix, prefixes } = req.body || {};
