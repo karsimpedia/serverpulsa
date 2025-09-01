@@ -1,4 +1,4 @@
-// api/routes/billing.js
+// api/routes/topupInqPay.js
 import express from "express";
 import { getTransactionByInvoice } from "../controllers/transactionDetail.js";
 const router = express.Router();

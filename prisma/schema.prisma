@@ -83,6 +83,7 @@ model User {
   id        String   @id @default(uuid())
   username  String   @unique
   password  String
+  tokenVersion Int      @default(1)
   role      UserRole @default(RESELLER)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

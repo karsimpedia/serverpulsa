@@ -9,7 +9,7 @@ import { topupSaldoManual } from '../controllers/saldo.js';
 import { createResellerByAdmin } from '../controllers/admin/createResellerByAdmin.js';
 import { listTransactions, transactionStats } from '../controllers/monitor.js';
 import { upsertSupplierProductsByCategory } from '../controllers/supplierProductCategory.js';
-
+import { authAdmin } from '../middleware/auth.js';
 // SUPPLIER (CRUD)
 import {
   createSupplier,
@@ -66,7 +66,7 @@ router.post('/saldo/topup',  topupSaldoManual);
 router.post('/resellers',  createResellerByAdmin);
 
 // Monitoring transaksi
-router.get('/transactions', listTransactions);
+router.get('/transactions',  authAdmin , listTransactions);
 router.get('/transactions/stats',  transactionStats);
 
 // ===== Supplier (CRUD) =====
