@@ -10,6 +10,8 @@ import { createResellerByAdmin } from '../controllers/admin/createResellerByAdmi
 import { listTransactions, transactionStats } from '../controllers/monitor.js';
 import { upsertSupplierProductsByCategory } from '../controllers/supplierProductCategory.js';
 import { authAdmin } from '../middleware/auth.js';
+
+
 // SUPPLIER (CRUD)
 import {
   createSupplier,
@@ -53,7 +55,7 @@ import {
 } from '../controllers/admin/supplierConfig.controller.js';
 
 const router = express.Router();
-
+router.use(authAdmin)
 /**
  * AUTH
  * - Login admin: no auth

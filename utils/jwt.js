@@ -5,6 +5,7 @@ import crypto from "crypto";
 const JWT_SECRET = process.env.JWT_SECRET || "change-this";
 const JWT_ISS = process.env.JWT_ISS || "serverpulsa";
 const JWT_AUD = process.env.JWT_AUD || "serverpulsa-admin";
+
 export const ACCESS_TTL_SEC = parseInt(process.env.ACCESS_TTL_SEC || "", 10) || 15 * 60; // 15m
 
 export function signAccessToken(user, extra = {}) {

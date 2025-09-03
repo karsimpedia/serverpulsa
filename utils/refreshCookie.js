@@ -3,6 +3,7 @@ export const REFRESH_COOKIE = process.env.REFRESH_COOKIE || "rtid";
 
 export function setRefreshCookie(res, sid, maxAgeSec) {
   const isProd = process.env.NODE_ENV === "production";
+    console.log(isProd)
   res.cookie(REFRESH_COOKIE, sid, {
     httpOnly: true,
     secure: isProd,                 // wajib true bila HTTPS/production
@@ -14,6 +15,7 @@ export function setRefreshCookie(res, sid, maxAgeSec) {
 
 export function clearRefreshCookie(res) {
   const isProd = process.env.NODE_ENV === "production";
+  console.log(isProd)
   res.clearCookie(REFRESH_COOKIE, {
     httpOnly: true,
     secure: isProd,

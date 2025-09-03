@@ -1,28 +1,32 @@
 // FILE: api/routes/reseller.js
 
-import express from "express"
+import express from "express";
 const routeReseller = express.Router();
+import { authAdmin } from "../middleware/auth.js";
 
+import {
+  resellerList,
+  updateReseller,
+  deleteReseller,
+  getSaldo,
+  getMutasi,
+  createResellerCallback,
+  getReseller,
+} from "../controllers/reseller.js";
 
-import { registerReseller, resellerList , updateReseller, deleteReseller, getSaldo, getMutasi, createResellerCallback} from "../controllers/reseller.js";
-// Register new reseller
-routeReseller.post("/register",registerReseller);
-
+routeReseller.get("/:id", authAdmin, getReseller);
+routeReseller.patch("/:id", authAdmin, updateReseller);
 // Get all resellers
-routeReseller.get("/", resellerList);
-routeReseller.post("/callback",  createResellerCallback);
+routeReseller.get("/", authAdmin, resellerList);
+// routeReseller.post("/callback",  createResellerCallback);
 
-routeReseller.get("/saldo/:id", getSaldo);
-routeReseller.get("/mutasi/:id", getMutasi);
+routeReseller.get("/saldo/:id", authAdmin, getSaldo);
+routeReseller.get("/mutasi/:id", authAdmin, getMutasi);
 
 // Update reseller by ID
-routeReseller.put("/:id", updateReseller);
-
-
-
+routeReseller.put("/:id", authAdmin, updateReseller);
 
 // Delete reseller by ID
-routeReseller.delete("/:id", deleteReseller);
+routeReseller.delete("/:id", authAdmin, deleteReseller);
 
-export  default routeReseller
-
+export default routeReseller;

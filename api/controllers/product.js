@@ -636,7 +636,7 @@ export async function getAllProducts(req, res) {
     const types = rawType
       ? Array.from(
           new Set(
-            rawTypeW
+            rawType
               .split(",")
               .map((s) => s.trim())
               .filter(Boolean)

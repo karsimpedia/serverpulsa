@@ -4,11 +4,15 @@ import { Router } from "express";
 import { authReseller } from "../../middleware/auth.js";
 import { loginReseller , me, logout } from "../../controllers/auth.js";
 import { resellerPriceList } from "../../controllers/myEffectivePrice.js";
-import { getMutasibyReseller, listTransactions, listMyDownlines } from "../../controllers/reseller.js";
+import { getMutasibyReseller, listTransactions, listMyDownlines, registerReseller, createResellerCallback } from "../../controllers/reseller.js";
 import { getTransactionDetail } from "../../controllers/transactionDetail.js";
 import { setDownlineGlobalMarkup } from "../../controllers/resellerMarkup.js";
 const router = Router()
 
+
+router.post("/callback",  createResellerCallback  )
+
+router.post("/register", registerReseller  )
 router.post("/login", loginReseller )
 router.get("/logout", logout )
 router.get("/me", authReseller,  me)

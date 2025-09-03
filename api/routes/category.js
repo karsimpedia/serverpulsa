@@ -13,9 +13,10 @@ updateCategoryById,
   replaceCategoryPrefixes,
   deleteCategoryPrefix
 } from "../controllers/category.js";
-
+import { authAdmin } from "../middleware/auth.js";
 const router = Router();
 
+router.use( authAdmin)
 // kategori
 router.post("/", upsertCategory);  // create/update by name
 router.patch("/:id", updateCategoryById);   //update category by id      

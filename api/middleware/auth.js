@@ -42,6 +42,7 @@ export function authRequired(req, res, next) {
 
 export function authAdmin(req, res, next) {
   const t = getToken(req);
+ 
   if (!t) return res.status(401).json({ error: "Unauthorized" });
   try {
     const claims = verifyToken(t);
